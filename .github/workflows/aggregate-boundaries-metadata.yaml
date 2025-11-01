@@ -1,0 +1,165 @@
+name: Aggregate Boundaries Metadata
+
+on:
+  workflow_call:
+    secrets:
+      RCLONE_CONFIG_DATA:
+        required: true
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - Continent Boundary
+      - Country Boundary
+      - Planet Coastline
+    types: [completed]
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  RCLONE_REMOTE: openplanetdata-r2
+  RCLONE_BASE_PATH: openplanetdata
+
+jobs:
+  aggregate:
+    runs-on: self-hosted
+
+    steps:
+      - name: Install required tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          need_install() { ! command -v "$1" >/dev/null 2>&1; }
+
+          pkgs=()
+          need_install jq && pkgs+=(jq)
+
+          if [ ${#pkgs[@]} -eq 0 ]; then
+            echo "All required packages already present."
+            exit 0
+          fi
+
+          if command -v dnf >/dev/null 2>&1; then
+            sudo dnf -y install "${pkgs[@]}"
+          elif command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y "${pkgs[@]}"
+          else
+            echo "Unsupported package manager. Install ${pkgs[*]} manually." >&2
+            exit 1
+          fi
+
+      - name: Install Rclone
+        uses: openplanetdata/actions/install-rclone@main
+        env:
+          RCLONE_CONFIG_DATA: ${{ secrets.RCLONE_CONFIG_DATA }}
+
+      - name: Aggregate metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TMPDIR=$(mktemp -d)
+          trap 'rm -rf "$TMPDIR"' EXIT
+
+          OUTPUT="$TMPDIR/aggregate.json"
+          jq -n '[]' > "$OUTPUT"
+
+          declare -A CATEGORY_LABELS=(
+            [coastline]="coastline"
+            [continents]="continent"
+            [countries]="country"
+          )
+
+          DIRS=(coastline continents countries)
+
+          for dir in "${DIRS[@]}"; do
+            category="${CATEGORY_LABELS[$dir]}"
+            base_path="${RCLONE_REMOTE}:${RCLONE_BASE_PATH}/boundaries/${dir}"
+
+            echo "::group::Processing ${dir} metadata"
+            if ! rclone lsjson "$base_path" --files-only --recursive --include "*.metadata" > "$TMPDIR/list.json"; then
+              echo "⚠️  Unable to list metadata under $base_path"
+              echo "::endgroup::"
+              continue
+            fi
+
+            if [ "$(jq 'length' "$TMPDIR/list.json")" -eq 0 ]; then
+              echo "No metadata files found for ${dir}"
+              echo "::endgroup::"
+              continue
+            fi
+
+            jq -r '.[].Path' "$TMPDIR/list.json" | while IFS= read -r relpath; do
+              echo "→ $relpath"
+              if ! rclone cat "$base_path/$relpath" > "$TMPDIR/meta.json"; then
+                echo "  ⚠️  Failed to download metadata: $relpath"
+                continue
+              fi
+
+              remote_filename=$(jq -r '.remote_filename // empty' "$TMPDIR/meta.json")
+              if [ -n "$remote_filename" ]; then
+                format="${remote_filename##*.}"
+              else
+                format="unknown"
+                if [[ "$relpath" =~ \.([^.]+)\.metadata$ ]]; then
+                  format="${BASH_REMATCH[1]}"
+                fi
+              fi
+              format="${format,,}"
+
+              if [ "$dir" = "coastline" ]; then
+                entity="planet"
+              else
+                entity="${relpath%%/*}"
+                if [ "$dir" = "countries" ]; then
+                  entity="${entity^^}"
+                fi
+              fi
+
+              jq --slurpfile meta "$TMPDIR/meta.json" \
+                 --arg category "$category" \
+                 --arg format "$format" \
+                 --arg entity "$entity" \
+                 --arg metadata_path "boundaries/${dir}/${relpath}" \
+                 '. + [($meta[0] + {category: $category, format: $format, entity: $entity, metadata_path: $metadata_path})]' \
+                 "$OUTPUT" > "$TMPDIR/tmp.json"
+              mv "$TMPDIR/tmp.json" "$OUTPUT"
+            done
+            echo "::endgroup::"
+          done
+
+          jq '
+            map(. | to_entries | sort_by(.key) | from_entries)
+            | sort_by(
+                .category,
+                .entity,
+                .format,
+                (.remote_filename // ""),
+                (.metadata_path // "")
+              )
+          ' "$OUTPUT" > boundaries.metadata
+
+          echo "::group::Aggregated metadata preview"
+          jq . boundaries.metadata
+          echo "::endgroup::"
+
+      - name: Upload aggregated metadata to R2
+        uses: openplanetdata/actions/upload@main
+        env:
+          RCLONE_CONFIG_DATA: ${{ secrets.RCLONE_CONFIG_DATA }}
+        with:
+          file: boundaries.metadata
+          remote_filename: boundaries.metadata
+          remote_path: /boundaries
+          remote_version: ""
+          remote_version_prefix: ""
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          rm -f boundaries.metadata
+          find /tmp -maxdepth 1 -name "tmp.*" -user "$USER" -exec rm -rf {} + 2>/dev/null || true

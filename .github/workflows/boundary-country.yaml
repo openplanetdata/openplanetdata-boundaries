@@ -1,0 +1,113 @@
+name: Country Boundary
+
+on:
+  workflow_dispatch:
+    inputs:
+      country_codes:
+        description: 'Comma-separated list of country codes to process (e.g. FR, DE, US). Leave empty to process all countries.'
+        required: false
+        type: string
+        default: ''
+  schedule:
+    - cron: '0 4 1 * *'  # Monthly on the 1st at 04:00 UTC
+
+jobs:
+  prepare:
+    runs-on: self-hosted
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          clean: false
+
+      - name: Set up matrix
+        id: set-matrix
+        env:
+          INPUT_CODES: ${{ github.event.inputs.country_codes }}
+        run: |
+          # Build matrix of countries to process
+          MATRIX_JSON=$(python3 <<'PY'
+          import json
+          import os
+          import sys
+
+          raw_input = (os.environ.get('INPUT_CODES') or '').strip()
+
+          with open('.github/data/countries.json', 'r') as f:
+              countries = json.load(f)
+
+          if raw_input:
+              codes = []
+              for raw_code in raw_input.split(','):
+                  raw_code = raw_code.strip()
+                  if not raw_code:
+                      continue
+                  codes.append(raw_code.upper())
+          else:
+              codes = sorted(countries.keys())
+
+          matrix = []
+          for code in codes:
+              if code in countries:
+                  country = countries[code]
+                  tag_name = country['name'].lower().replace(' ', '-').replace('.', '').replace(',', '')
+                  osm_query = f'a["ISO3166-1:alpha2"="{code}"]'
+                  matrix.append({
+                      'code': code,
+                      'name': country['name'],
+                      'osm_query': osm_query,
+                      'tag_name': tag_name,
+                      'has_coastline': country.get('has_coastline', True)
+                  })
+              else:
+                  print(f'Warning: Unknown country code: {code}', file=sys.stderr)
+
+          print(json.dumps({'include': matrix}))
+          PY
+          )
+
+          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+          echo "Matrix: $MATRIX_JSON"
+
+  extract:
+    needs: prepare
+    if: needs.prepare.outputs.matrix != '{"include":[]}'
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    uses: ./.github/workflows/reusable-boundaries.yaml
+    with:
+      cleanup_planet_files: false
+      entity_code: ${{ matrix.code }}
+      entity_name: ${{ matrix.name }}
+      entity_type: country
+      has_coastline: ${{ matrix.has_coastline }}
+      osm_query: ${{ matrix.osm_query }}
+      remote_path: /boundaries/countries
+      remote_version: 1
+      tags: |
+        boundary
+        country
+        ${{ matrix.tag_name }}
+        geojson
+        openstreetmap
+        public
+    secrets:
+      RCLONE_CONFIG_DATA: ${{ secrets.RCLONE_CONFIG_DATA }}
+
+  cleanup:
+    needs: extract
+    if: always()
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          clean: false
+
+      - name: Cleanup downloaded files
+        uses: openplanetdata/actions/cleanup-downloads@main

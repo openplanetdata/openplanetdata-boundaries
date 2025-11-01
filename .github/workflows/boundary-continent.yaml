@@ -1,0 +1,259 @@
+name: Continent Boundary
+
+on:
+  workflow_dispatch:
+    inputs:
+      continents:
+        description: 'Comma-separated list of continent slugs (africa, antarctica, asia, europe, north_america, oceania, south_america). Leave empty to process all.'
+        required: false
+        type: string
+        default: ''
+  schedule:
+    - cron: '0 5 1 * *'  # Monthly on the 1st at 05:00 UTC
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+    steps:
+      - name: Determine continents
+        id: generate
+        env:
+          INPUT_CONTINENTS: ${{ github.event.inputs.continents || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          MATRIX=$(
+            python3 <<'PY'
+          import json
+          import os
+          import sys
+
+          all_continents = [
+              ("africa", "Africa"),
+              ("antarctica", "Antarctica"),
+              ("asia", "Asia"),
+              ("europe", "Europe"),
+              ("north-america", "North America"),
+              ("oceania", "Oceania"),
+              ("south-america", "South America"),
+          ]
+
+          event_name = os.environ.get("EVENT_NAME", "")
+          requested = os.environ.get("INPUT_CONTINENTS", "").strip()
+
+          slug_to_name = dict(all_continents)
+
+          if event_name == "schedule" or not requested:
+              selected = [slug for slug, _ in all_continents]
+          else:
+              selected = []
+              for item in requested.split(","):
+                  slug = item.strip().lower()
+                  if not slug:
+                      continue
+                  if slug not in slug_to_name:
+                      print(f"::error::Invalid continent slug: {slug}", file=sys.stderr)
+                      sys.exit(1)
+                  if slug not in selected:
+                      selected.append(slug)
+              if not selected:
+                  selected = [slug for slug, _ in all_continents]
+
+          matrix = [{"slug": slug, "name": slug_to_name[slug]} for slug in selected]
+          print(json.dumps({"include": matrix}))
+          PY
+          )
+
+          if [ -z "$MATRIX" ] || [ "$MATRIX" = '{"include":[]}' ]; then
+            echo "::error::Failed to determine continent matrix" >&2
+            exit 1
+          fi
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Matrix configuration: $MATRIX"
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.matrix != ''
+    runs-on: self-hosted
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          clean: false
+
+      - name: Set date tag
+        id: date
+        uses: openplanetdata/actions/set-date-tag@main
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          need_install() { ! command -v "$1" &>/dev/null; }
+
+          if command -v apt-get &>/dev/null; then
+            PKGS=()
+            need_install ogr2ogr && PKGS+=(gdal-bin)
+            need_install ogrinfo && PKGS+=(gdal-bin)
+            if [ ${#PKGS[@]} -gt 0 ]; then
+              PKGS=($(printf '%s\n' "${PKGS[@]}" | sort -u))
+              sudo apt-get update -qq
+              sudo apt-get install -y "${PKGS[@]}"
+            fi
+          elif command -v dnf &>/dev/null; then
+            PKGS=()
+            need_install ogr2ogr && PKGS+=(gdal)
+            need_install ogrinfo && PKGS+=(gdal)
+            if [ ${#PKGS[@]} -gt 0 ]; then
+              PKGS=($(printf '%s\n' "${PKGS[@]}" | sort -u))
+              sudo dnf -y install "${PKGS[@]}"
+            fi
+          fi
+
+          command -v ogr2ogr && ogr2ogr --version
+          command -v ogrinfo && ogrinfo --version
+
+      - name: Download continent cookie-cutter
+        uses: openplanetdata/actions/download@main
+        with:
+          remote_path: /boundaries/continents/continent-cookie-cutter.gpkg
+
+      - name: Download coastline GeoPackage
+        uses: openplanetdata/actions/download@main
+        with:
+          remote_path: /boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg
+
+      - name: Generate continent boundary
+        id: generate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.date.outputs.tag }}"
+          CONTINENT="${{ matrix.slug }}"
+          CONTINENT_SLUG="$CONTINENT"
+          OUT_DIR="build/continents/${TAG}"
+          BASENAME="${OUT_DIR}/${CONTINENT_SLUG}-latest.boundary"
+
+          mkdir -p "$OUT_DIR"
+
+          ./scripts/create-continent-boundary.sh \
+            "$CONTINENT" \
+            "continent-cookie-cutter.gpkg" \
+            "planet-latest.coastline.gpkg" \
+            "$BASENAME"
+
+          ls -lh "$OUT_DIR"
+
+          echo "gpkg=${BASENAME}.gpkg" >> "$GITHUB_OUTPUT"
+          echo "geojson=${BASENAME}.geojson" >> "$GITHUB_OUTPUT"
+          echo "parquet=${BASENAME}.parquet" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "slug=${CONTINENT_SLUG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GeoPackage metadata
+        uses: openplanetdata/actions/create-metadata@main
+        with:
+          file: ${{ steps.generate.outputs.gpkg }}
+          remote_filename: ${{ steps.generate.outputs.slug }}-latest.boundary.gpkg
+          remote_path: /boundaries/continents/${{ steps.generate.outputs.slug }}/geopackage
+          remote_version: 1
+          tags: |
+            boundary
+            continent
+            ${{ matrix.slug }}
+            geopackage
+            openstreetmap
+            public
+
+      - name: Upload GeoPackage to R2
+        uses: openplanetdata/actions/upload@main
+        env:
+          RCLONE_CONFIG_DATA: ${{ secrets.RCLONE_CONFIG_DATA }}
+        with:
+          file: ${{ steps.generate.outputs.gpkg }}
+          remote_filename: ${{ steps.generate.outputs.slug }}-latest.boundary.gpkg
+          remote_path: /boundaries/continents/${{ steps.generate.outputs.slug }}/geopackage
+          remote_version: 1
+
+      - name: Create GeoJSON metadata
+        uses: openplanetdata/actions/create-metadata@main
+        with:
+          file: ${{ steps.generate.outputs.geojson }}
+          remote_filename: ${{ steps.generate.outputs.slug }}-latest.boundary.geojson
+          remote_path: /boundaries/continents/${{ steps.generate.outputs.slug }}/geojson
+          remote_version: 1
+          tags: |
+            boundary
+            continent
+            ${{ matrix.slug }}
+            geojson
+            openstreetmap
+            public
+
+      - name: Upload GeoJSON to R2
+        uses: openplanetdata/actions/upload@main
+        env:
+          RCLONE_CONFIG_DATA: ${{ secrets.RCLONE_CONFIG_DATA }}
+        with:
+          file: ${{ steps.generate.outputs.geojson }}
+          remote_filename: ${{ steps.generate.outputs.slug }}-latest.boundary.geojson
+          remote_path: /boundaries/continents/${{ steps.generate.outputs.slug }}/geojson
+          remote_version: 1
+
+      - name: Create GeoParquet metadata
+        uses: openplanetdata/actions/create-metadata@main
+        with:
+          file: ${{ steps.generate.outputs.parquet }}
+          remote_filename: ${{ steps.generate.outputs.slug }}-latest.boundary.parquet
+          remote_path: /boundaries/continents/${{ steps.generate.outputs.slug }}/geoparquet
+          remote_version: 1
+          tags: |
+            boundary
+            continent
+            ${{ matrix.slug }}
+            geoparquet
+            openstreetmap
+            public
+
+      - name: Upload GeoParquet to R2
+        uses: openplanetdata/actions/upload@main
+        env:
+          RCLONE_CONFIG_DATA: ${{ secrets.RCLONE_CONFIG_DATA }}
+        with:
+          file: ${{ steps.generate.outputs.parquet }}
+          remote_filename: ${{ steps.generate.outputs.slug }}-latest.boundary.parquet
+          remote_path: /boundaries/continents/${{ steps.generate.outputs.slug }}/geoparquet
+          remote_version: 1
+
+      - name: Cleanup generated files
+        if: always()
+        shell: bash
+        run: |
+          rm -f build/continents/${{ steps.generate.outputs.tag }}/*.boundary.* || true
+
+  cleanup:
+    needs: build
+    if: always()
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          clean: false
+
+      - name: Cleanup downloaded files
+        uses: openplanetdata/actions/cleanup-downloads@main
+
+      - name: Cleanup build artifacts
+        shell: bash
+        run: |
+          rm -rf build/continents || true
