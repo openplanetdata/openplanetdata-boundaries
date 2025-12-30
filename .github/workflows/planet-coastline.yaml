@@ -270,10 +270,19 @@ jobs:
 
       - name: Cleanup generated files
         if: always()
+        env:
+          TAG: ${{ steps.date.outputs.tag }}
         run: |
           rm -f planet-*.coastline.gpkg planet-*.coastline.gpkg.{sha256,metadata}
+          rm -f planet-*.coastline.gpkg-journal
           rm -f planet-*.coastline.geojson planet-*.coastline.geojson.{sha256,metadata}
           rm -f planet-*.coastline.parquet planet-*.coastline.parquet.{sha256,metadata}
+          rm -f planet-*.coastline.osmcoastline.log
+          rm -f planet-latest.osm.pbf.*.partial
           find /tmp -name "tmp.*" -user "$USER" -delete 2>/dev/null || true
           # Clean up osmcoastline build directory if it exists
           rm -rf /tmp/osmcoastline
+          # Remove old PBF files, keep today's for caching
+          for f in planet-*.osm.pbf; do
+            [ -f "$f" ] && [ "$f" != "planet-${TAG}.osm.pbf" ] && rm -f "$f" || true
+          done
