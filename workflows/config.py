@@ -7,7 +7,7 @@ from kubernetes.client import models as k8s
 # =============================================================================
 # R2 Storage Configuration
 # =============================================================================
-R2_CONN_ID = "r2_default"
+R2_CONN_ID = "r2index-openplanetdata-production"
 R2_BUCKET = "openplanetdata"
 
 # Remote file references (path, filename, version)
