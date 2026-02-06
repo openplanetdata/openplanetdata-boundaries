@@ -44,6 +44,41 @@ with DAG(
     tags=["openplanetdata", "osm", "coastline"],
 ) as dag:
 
+    @task
+    def check_r2index_connection() -> None:
+        """Check R2Index connection via OpenBao before running the pipeline."""
+        from elaunira.airflow.providers.r2index.hooks.r2index import R2IndexHook
+
+        hook = R2IndexHook(r2index_conn_id=R2_CONN_ID)
+        config = hook._get_config_from_connection()
+
+        if config is None:
+            raise RuntimeError(f"Connection '{R2_CONN_ID}' returned no config")
+
+        # Log resolved values (mask secrets)
+        for key, value in config.items():
+            if value is None:
+                print(f"  {key}: NOT SET")
+            elif "secret" in key or "token" in key:
+                print(f"  {key}: {value[:8]}...{value[-4:]}" if len(value) > 12 else f"  {key}: ***")
+            else:
+                print(f"  {key}: {value}")
+
+        missing = [k for k, v in config.items() if not v]
+        if missing:
+            raise RuntimeError(f"Missing config values: {missing}")
+
+        # Quick API health check
+        import urllib.request
+
+        url = config["index_api_url"].rstrip("/") + "/files?limit=1"
+        req = urllib.request.Request(
+            url,
+            headers={"Authorization": f"Bearer {config['index_api_token']}"},
+        )
+        with urllib.request.urlopen(req) as resp:
+            print(f"  API check: HTTP {resp.status}")
+
     @task.r2index_download(bucket=R2_BUCKET, r2index_conn_id=R2_CONN_ID)
     def download_planet_pbf() -> DownloadItem:
         """Download planet PBF from R2."""
@@ -148,7 +183,9 @@ with DAG(
             shutil.rmtree(WORK_DIR, ignore_errors=True)
 
     # Task flow
+    conn_check = check_r2index_connection()
     download_result = download_planet_pbf()
+    conn_check >> download_result
     osmcoastline_done = run_osmcoastline(download_result)
     parsed = parse_osmcoastline_logs()
     geojson = export_geojson()
