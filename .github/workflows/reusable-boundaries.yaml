@@ -68,8 +68,23 @@ on:
         value: ${{ jobs.extract.outputs.success }}
 
     secrets:
-      RCLONE_CONFIG_DATA:
-        description: 'Rclone configuration for R2 access'
+      R2INDEX_API_URL:
+        description: 'R2Index API URL'
+        required: true
+      R2INDEX_API_TOKEN:
+        description: 'R2Index API token'
+        required: true
+      R2_ACCESS_KEY_ID:
+        description: 'R2 access key ID'
+        required: true
+      R2_SECRET_ACCESS_KEY:
+        description: 'R2 secret access key'
+        required: true
+      R2_ENDPOINT_URL:
+        description: 'R2 endpoint URL'
+        required: true
+      R2_BUCKET:
+        description: 'R2 bucket name'
         required: true
 
 jobs:
@@ -95,11 +110,11 @@ jobs:
         id: date
         uses: openplanetdata/actions/set-date-tag@main
 
-      - name: Install GOL
-        uses: openplanetdata/actions/install-gol@main
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          version: 2
+        - name: Install GOL
+          uses: openplanetdata/actions/install-gol@main
+          with:
+            github_token: ${{ secrets.GITHUB_TOKEN }}
+            version: 2
 
       - name: Install system dependencies
         shell: bash
@@ -148,7 +163,7 @@ jobs:
       - name: Install Python dependencies
         shell: bash
         run: |
-          python3 -m pip install --user pyproj
+          python3 -m pip install --user pyproj elaunira-r2index
 
       - name: Download planet GOL
         uses: openplanetdata/actions/download@main
@@ -399,68 +414,95 @@ jobs:
           echo "✅ $(basename $PARQUET_FILE) created successfully"
           echo "Finished at: $(date -u +%Y-%m-%d_%H:%M:%S)"
 
-      - name: Create metadata for GeoPackage
+      - name: Upload all formats to R2 and register
         if: steps.extract.outputs.success == 'true'
-        uses: openplanetdata/actions/create-metadata@main
-        with:
-          file: ${{ steps.extract.outputs.geopackage_file }}
-          remote_filename: ${{ inputs.entity_code }}-latest.boundary.gpkg
-          remote_path: ${{ inputs.remote_path }}/${{ inputs.entity_code }}/geopackage
-          remote_version: ${{ inputs.remote_version }}
-          tags: ${{ inputs.tags }}
-
-      - name: Upload GeoPackage to R2
-        if: steps.extract.outputs.success == 'true'
-        uses: openplanetdata/actions/upload@main
         env:
-          RCLONE_CONFIG_DATA: ${{ secrets.RCLONE_CONFIG_DATA }}
-        with:
-          file: ${{ steps.extract.outputs.geopackage_file }}
-          remote_filename: ${{ inputs.entity_code }}-latest.boundary.gpkg
-          remote_path: ${{ inputs.remote_path }}/${{ inputs.entity_code }}/geopackage
-          remote_version: ${{ inputs.remote_version }}
+          R2INDEX_API_URL: ${{ secrets.R2INDEX_API_URL }}
+          R2INDEX_API_TOKEN: ${{ secrets.R2INDEX_API_TOKEN }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        shell: bash
+        run: |
+          python3 << 'UPLOAD_SCRIPT'
+          import os
+          from elaunira.r2index import R2Config, R2IndexClient
 
-      - name: Create metadata
-        if: steps.extract.outputs.success == 'true'
-        uses: openplanetdata/actions/create-metadata@main
-        with:
-          file: ${{ steps.extract.outputs.output_file }}
-          remote_filename: ${{ inputs.entity_code }}-latest.boundary.geojson
-          remote_path: ${{ inputs.remote_path }}/${{ inputs.entity_code }}/geojson
-          remote_version: ${{ inputs.remote_version }}
-          tags: ${{ inputs.tags }}
+          # Configuration from inputs
+          entity_code = "${{ inputs.entity_code }}"
+          entity_type = "${{ inputs.entity_type }}"
+          remote_path = "${{ inputs.remote_path }}"
+          remote_version = "${{ inputs.remote_version }}"
+          tags = """${{ inputs.tags }}""".strip().split('\n')
+          tags = [t.strip() for t in tags if t.strip()]
 
-      - name: Upload to R2
-        if: steps.extract.outputs.success == 'true'
-        uses: openplanetdata/actions/upload@main
-        env:
-          RCLONE_CONFIG_DATA: ${{ secrets.RCLONE_CONFIG_DATA }}
-        with:
-          file: ${{ steps.extract.outputs.output_file }}
-          remote_filename: ${{ inputs.entity_code }}-latest.boundary.geojson
-          remote_path: ${{ inputs.remote_path }}/${{ inputs.entity_code }}/geojson
-          remote_version: ${{ inputs.remote_version }}
+          # File paths from extraction
+          geojson_file = "${{ steps.extract.outputs.output_file }}"
+          gpkg_file = "${{ steps.extract.outputs.geopackage_file }}"
+          parquet_file = "${{ steps.extract.outputs.parquet_file }}"
 
-      - name: Create metadata for Parquet
-        if: steps.extract.outputs.success == 'true'
-        uses: openplanetdata/actions/create-metadata@main
-        with:
-          file: ${{ steps.extract.outputs.parquet_file }}
-          remote_filename: ${{ inputs.entity_code }}-latest.boundary.parquet
-          remote_path: ${{ inputs.remote_path }}/${{ inputs.entity_code }}/geoparquet
-          remote_version: ${{ inputs.remote_version }}
-          tags: ${{ inputs.tags }}
+          # Initialize client
+          r2_config = R2Config(
+              access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+              secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+              endpoint_url=os.environ["R2_ENDPOINT_URL"],
+              bucket=os.environ["R2_BUCKET"],
+          )
 
-      - name: Upload Parquet to R2
-        if: steps.extract.outputs.success == 'true'
-        uses: openplanetdata/actions/upload@main
-        env:
-          RCLONE_CONFIG_DATA: ${{ secrets.RCLONE_CONFIG_DATA }}
-        with:
-          file: ${{ steps.extract.outputs.parquet_file }}
-          remote_filename: ${{ inputs.entity_code }}-latest.boundary.parquet
-          remote_path: ${{ inputs.remote_path }}/${{ inputs.entity_code }}/geoparquet
-          remote_version: ${{ inputs.remote_version }}
+          client = R2IndexClient(
+              api_url=os.environ["R2INDEX_API_URL"],
+              api_token=os.environ["R2INDEX_API_TOKEN"],
+              r2_config=r2_config,
+          )
+
+          category = "coastline" if entity_type == "coastline" else "boundary"
+
+          # Upload GeoPackage
+          if gpkg_file and os.path.exists(gpkg_file):
+              print(f"Uploading GeoPackage: {gpkg_file}")
+              record = client.upload_and_register(
+                  file_path=gpkg_file,
+                  category=category,
+                  entity=entity_code,
+                  remote_path=f"{remote_path}/{entity_code}/geopackage",
+                  remote_filename=f"{entity_code}-latest.boundary.gpkg",
+                  remote_version=remote_version,
+                  tags=tags + ["geopackage"],
+              )
+              print(f"  Registered: {record.id}")
+
+          # Upload GeoJSON
+          if geojson_file and os.path.exists(geojson_file):
+              print(f"Uploading GeoJSON: {geojson_file}")
+              record = client.upload_and_register(
+                  file_path=geojson_file,
+                  category=category,
+                  entity=entity_code,
+                  remote_path=f"{remote_path}/{entity_code}/geojson",
+                  remote_filename=f"{entity_code}-latest.boundary.geojson",
+                  remote_version=remote_version,
+                  tags=tags + ["geojson"],
+              )
+              print(f"  Registered: {record.id}")
+
+          # Upload GeoParquet
+          if parquet_file and os.path.exists(parquet_file):
+              print(f"Uploading GeoParquet: {parquet_file}")
+              record = client.upload_and_register(
+                  file_path=parquet_file,
+                  category=category,
+                  entity=entity_code,
+                  remote_path=f"{remote_path}/{entity_code}/geoparquet",
+                  remote_filename=f"{entity_code}-latest.boundary.parquet",
+                  remote_version=remote_version,
+                  tags=tags + ["geoparquet"],
+              )
+              print(f"  Registered: {record.id}")
+
+          client.close()
+          print("All files uploaded and registered successfully")
+          UPLOAD_SCRIPT
 
       - name: Cleanup generated files
         if: always()

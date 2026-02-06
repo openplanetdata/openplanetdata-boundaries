@@ -3,7 +3,17 @@ name: Aggregate Boundaries Metadata
 on:
   workflow_call:
     secrets:
-      RCLONE_CONFIG_DATA:
+      R2INDEX_API_URL:
+        required: true
+      R2INDEX_API_TOKEN:
+        required: true
+      R2_ACCESS_KEY_ID:
+        required: true
+      R2_SECRET_ACCESS_KEY:
+        required: true
+      R2_ENDPOINT_URL:
+        required: true
+      R2_BUCKET:
         required: true
   workflow_dispatch:
   workflow_run:
@@ -17,10 +27,6 @@ on:
 permissions:
   actions: read
   contents: read
-
-env:
-  RCLONE_REMOTE: openplanetdata-r2
-  RCLONE_BASE_PATH: openplanetdata
 
 jobs:
   aggregate:
@@ -51,115 +57,131 @@ jobs:
             exit 1
           fi
 
-      - name: Install Rclone
-        uses: openplanetdata/actions/install-rclone@main
-        env:
-          RCLONE_CONFIG_DATA: ${{ secrets.RCLONE_CONFIG_DATA }}
-
-      - name: Aggregate metadata
+      - name: Install Python dependencies
         shell: bash
         run: |
-          set -euo pipefail
+          python3 -m pip install --user elaunira-r2index
 
-          TMPDIR=$(mktemp -d)
-          trap 'rm -rf "$TMPDIR"' EXIT
+      - name: Aggregate metadata from r2index API
+        env:
+          R2INDEX_API_URL: ${{ secrets.R2INDEX_API_URL }}
+          R2INDEX_API_TOKEN: ${{ secrets.R2INDEX_API_TOKEN }}
+        shell: bash
+        run: |
+          python3 << 'AGGREGATE_SCRIPT'
+          import json
+          import os
+          from elaunira.r2index import R2IndexClient
 
-          OUTPUT="$TMPDIR/aggregate.json"
-          jq -n '[]' > "$OUTPUT"
-
-          declare -A CATEGORY_LABELS=(
-            [coastline]="coastline"
-            [continents]="continent"
-            [countries]="country"
+          client = R2IndexClient(
+              api_url=os.environ["R2INDEX_API_URL"],
+              api_token=os.environ["R2INDEX_API_TOKEN"],
           )
 
-          DIRS=(coastline continents countries)
+          # Single API call to get all file metadata
+          print("Fetching file index from r2index API...")
+          entries = client.get_index()
+          print(f"Found {len(entries)} files")
 
-          for dir in "${DIRS[@]}"; do
-            category="${CATEGORY_LABELS[$dir]}"
-            base_path="${RCLONE_REMOTE}:${RCLONE_BASE_PATH}/boundaries/${dir}"
+          # Convert to aggregated metadata format
+          aggregated = []
+          for entry in entries:
+              # Determine format from filename
+              filename = entry.remote_filename
+              if filename.endswith(".geojson"):
+                  format_ext = "geojson"
+              elif filename.endswith(".gpkg"):
+                  format_ext = "gpkg"
+              elif filename.endswith(".parquet"):
+                  format_ext = "parquet"
+              else:
+                  format_ext = filename.rsplit(".", 1)[-1] if "." in filename else "unknown"
 
-            echo "::group::Processing ${dir} metadata"
-            if ! rclone lsjson "$base_path" --files-only --recursive --include "*.metadata" > "$TMPDIR/list.json"; then
-              echo "⚠️  Unable to list metadata under $base_path"
-              echo "::endgroup::"
-              continue
-            fi
+              metadata = {
+                  "category": entry.category,
+                  "entity": entry.entity,
+                  "format": format_ext,
+                  "id": entry.id,
+                  "md5": entry.md5,
+                  "name": entry.name,
+                  "remote_filename": entry.remote_filename,
+                  "remote_path": entry.remote_path,
+                  "remote_version": entry.remote_version,
+                  "sha1": entry.sha1,
+                  "sha256": entry.sha256,
+                  "sha512": entry.sha512,
+                  "size": entry.size,
+                  "tags": entry.tags,
+              }
+              aggregated.append(metadata)
 
-            if [ "$(jq 'length' "$TMPDIR/list.json")" -eq 0 ]; then
-              echo "No metadata files found for ${dir}"
-              echo "::endgroup::"
-              continue
-            fi
-
-            jq -r '.[].Path' "$TMPDIR/list.json" | while IFS= read -r relpath; do
-              echo "→ $relpath"
-              if ! rclone cat "$base_path/$relpath" > "$TMPDIR/meta.json"; then
-                echo "  ⚠️  Failed to download metadata: $relpath"
-                continue
-              fi
-
-              remote_filename=$(jq -r '.remote_filename // empty' "$TMPDIR/meta.json")
-              if [ -n "$remote_filename" ]; then
-                format="${remote_filename##*.}"
-              else
-                format="unknown"
-                if [[ "$relpath" =~ \.([^.]+)\.metadata$ ]]; then
-                  format="${BASH_REMATCH[1]}"
-                fi
-              fi
-              format="${format,,}"
-
-              if [ "$dir" = "coastline" ]; then
-                entity="planet"
-              else
-                entity="${relpath%%/*}"
-                if [ "$dir" = "countries" ]; then
-                  entity="${entity^^}"
-                fi
-              fi
-
-              jq --slurpfile meta "$TMPDIR/meta.json" \
-                 --arg category "$category" \
-                 --arg format "$format" \
-                 --arg entity "$entity" \
-                 --arg metadata_path "boundaries/${dir}/${relpath}" \
-                 '. + [($meta[0] + {category: $category, format: $format, entity: $entity, metadata_path: $metadata_path})]' \
-                 "$OUTPUT" > "$TMPDIR/tmp.json"
-              mv "$TMPDIR/tmp.json" "$OUTPUT"
-            done
-            echo "::endgroup::"
-          done
-
-          jq '
-            map(. | to_entries | sort_by(.key) | from_entries)
-            | sort_by(
-                .category,
-                .entity,
-                .format,
-                (.remote_filename // ""),
-                (.metadata_path // "")
+          # Sort by category, entity, format
+          aggregated.sort(
+              key=lambda x: (
+                  x.get("category", ""),
+                  x.get("entity", ""),
+                  x.get("format", ""),
+                  x.get("remote_filename", ""),
               )
-          ' "$OUTPUT" > boundaries.metadata
+          )
 
-          echo "::group::Aggregated metadata preview"
-          jq . boundaries.metadata
-          echo "::endgroup::"
+          # Sort keys within each entry
+          sorted_aggregated = [dict(sorted(entry.items())) for entry in aggregated]
+
+          with open("boundaries.metadata", "w") as f:
+              json.dump(sorted_aggregated, f, indent=2)
+
+          client.close()
+
+          print(f"Aggregated {len(sorted_aggregated)} metadata entries")
+          print("Preview:")
+          print(json.dumps(sorted_aggregated[:3], indent=2))
+          AGGREGATE_SCRIPT
 
       - name: Upload aggregated metadata to R2
-        uses: openplanetdata/actions/upload@main
         env:
-          RCLONE_CONFIG_DATA: ${{ secrets.RCLONE_CONFIG_DATA }}
-        with:
-          file: boundaries.metadata
-          remote_filename: boundaries.metadata
-          remote_path: /boundaries
-          remote_version: ""
-          remote_version_prefix: ""
+          R2INDEX_API_URL: ${{ secrets.R2INDEX_API_URL }}
+          R2INDEX_API_TOKEN: ${{ secrets.R2INDEX_API_TOKEN }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        shell: bash
+        run: |
+          python3 << 'UPLOAD_SCRIPT'
+          import os
+          from elaunira.r2index import R2Config, R2IndexClient
+
+          r2_config = R2Config(
+              access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+              secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+              endpoint_url=os.environ["R2_ENDPOINT_URL"],
+              bucket=os.environ["R2_BUCKET"],
+          )
+
+          client = R2IndexClient(
+              api_url=os.environ["R2INDEX_API_URL"],
+              api_token=os.environ["R2INDEX_API_TOKEN"],
+              r2_config=r2_config,
+          )
+
+          print("Uploading boundaries.metadata to R2...")
+          record = client.upload_and_register(
+              file_path="boundaries.metadata",
+              category="metadata",
+              entity="boundaries",
+              remote_path="/boundaries",
+              remote_filename="boundaries.metadata",
+              remote_version="",
+              tags=["metadata", "index", "boundaries"],
+          )
+
+          client.close()
+          print(f"Uploaded: {record.id}")
+          UPLOAD_SCRIPT
 
       - name: Cleanup
         if: always()
         shell: bash
         run: |
           rm -f boundaries.metadata
-          find /tmp -maxdepth 1 -name "tmp.*" -user "$USER" -exec rm -rf {} + 2>/dev/null || true
