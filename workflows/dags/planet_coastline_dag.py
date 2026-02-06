@@ -71,13 +71,20 @@ with DAG(
         # Quick API health check
         import urllib.request
 
+        token = config["index_api_token"]
+        print(f"  token length: {len(token)}, repr: {repr(token[:12])}...{repr(token[-4:])}")
+
         url = config["index_api_url"].rstrip("/") + "/files?limit=1"
         req = urllib.request.Request(
             url,
-            headers={"Authorization": f"Bearer {config['index_api_token']}"},
+            headers={"Authorization": f"Bearer {token}"},
         )
-        with urllib.request.urlopen(req) as resp:
-            print(f"  API check: HTTP {resp.status}")
+        try:
+            with urllib.request.urlopen(req) as resp:
+                print(f"  API check: HTTP {resp.status}")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            raise RuntimeError(f"API check failed: HTTP {e.code} - {body}") from e
 
     @task.r2index_download(bucket=R2_BUCKET, r2index_conn_id=R2_CONN_ID)
     def download_planet_pbf() -> DownloadItem:
