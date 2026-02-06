@@ -1,0 +1,8 @@
+[project]
+name = "openplanetdata-boundaries"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "apache-airflow>=3.0",
+    "elaunira-airflow-providers-r2index",
+]
