@@ -32,7 +32,9 @@ with DAG(
     dag_id="openplanetdata-planet-coastline",
     default_args={
         "execution_timeout": timedelta(hours=2),
+        "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
+        "queue": "cortex",
         "retries": 1,
         "retry_delay": timedelta(minutes=5),
     },
