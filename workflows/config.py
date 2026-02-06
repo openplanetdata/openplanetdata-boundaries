@@ -2,13 +2,7 @@
 Configuration constants for OpenPlanetData Boundaries Airflow DAGs.
 """
 
-from openplanetdata.airflow.utils.k8s import (
-    POD_DEFAULT,
-    POD_LARGE,
-    POD_MEDIUM,
-    POD_XLARGE,
-    create_pod_spec,
-)
+from kubernetes.client import models as k8s
 
 # =============================================================================
 # R2 Storage Configuration
@@ -42,13 +36,33 @@ CONTINENTS = [
 ]
 
 # =============================================================================
-# Pod Configurations (re-exported from shared package for convenience)
+# Pod Configurations for KubernetesExecutor
 # =============================================================================
-POD_CONFIG_DEFAULT = POD_DEFAULT
-POD_CONFIG_GDAL = POD_MEDIUM
-POD_CONFIG_OSMCOASTLINE = POD_XLARGE
-POD_CONFIG_BOUNDARY_EXTRACTION = POD_LARGE
-POD_CONFIG_CONTINENT_EXTRACTION = POD_LARGE
+
+
+def _pod_config(cpu_req, mem_req, cpu_lim, mem_lim):
+    return {
+        "pod_override": k8s.V1Pod(
+            spec=k8s.V1PodSpec(
+                containers=[
+                    k8s.V1Container(
+                        name="base",
+                        resources=k8s.V1ResourceRequirements(
+                            requests={"cpu": cpu_req, "memory": mem_req},
+                            limits={"cpu": cpu_lim, "memory": mem_lim},
+                        ),
+                    )
+                ]
+            )
+        )
+    }
+
+
+POD_CONFIG_DEFAULT = _pod_config("100m", "256Mi", "500m", "1Gi")
+POD_CONFIG_GDAL = _pod_config("500m", "1Gi", "2", "4Gi")
+POD_CONFIG_BOUNDARY_EXTRACTION = _pod_config("1", "2Gi", "4", "8Gi")
+POD_CONFIG_CONTINENT_EXTRACTION = POD_CONFIG_BOUNDARY_EXTRACTION
+POD_CONFIG_OSMCOASTLINE = _pod_config("2", "4Gi", "8", "16Gi")
 
 # =============================================================================
 # Task parallelism limits
