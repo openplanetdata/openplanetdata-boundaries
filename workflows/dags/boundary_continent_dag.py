@@ -40,7 +40,7 @@ from workflows.config import (
     POD_CONFIG_CONTINENT_EXTRACTION,
     POD_CONFIG_DEFAULT,
     R2_BUCKET,
-    R2_CONN_ID,
+    R2INDEX_CONNECTION_ID,
 )
 
 # Reference to coastline asset (consumed by this DAG)
@@ -77,7 +77,7 @@ with DAG(
 
     @task.r2index_download(
         bucket=R2_BUCKET,
-        r2index_conn_id=R2_CONN_ID,
+        r2index_conn_id=R2INDEX_CONNECTION_ID,
         executor_config=POD_CONFIG_DEFAULT,
     )
     def download_coastline() -> DownloadItem:
@@ -92,7 +92,7 @@ with DAG(
 
     @task.r2index_download(
         bucket=R2_BUCKET,
-        r2index_conn_id=R2_CONN_ID,
+        r2index_conn_id=R2INDEX_CONNECTION_ID,
         executor_config=POD_CONFIG_DEFAULT,
     )
     def download_cookie_cutter() -> DownloadItem:
@@ -202,7 +202,7 @@ with DAG(
             slug = continent["slug"]
             tags = CONTINENT_TAGS + [slug]
 
-            hook = R2IndexHook(r2index_conn_id=R2_CONN_ID)
+            hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
             base_path = f"boundaries/continents/{slug}"
             filename_base = f"{slug}-latest.boundary"
 

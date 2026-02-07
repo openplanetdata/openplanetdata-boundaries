@@ -28,7 +28,7 @@ from workflows.config import (
     BOUNDARIES_BASE_PATH,
     POD_CONFIG_DEFAULT,
     R2_BUCKET,
-    R2_CONN_ID,
+    R2INDEX_CONNECTION_ID,
 )
 
 default_args = {
@@ -69,7 +69,7 @@ with DAG(
         output_path = os.path.join(work_dir, "boundaries.metadata")
 
         # Single API call replaces iterating through .metadata files
-        hook = R2IndexHook(r2index_conn_id=R2_CONN_ID)
+        hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
         response = hook.list_files(bucket=R2_BUCKET, category="boundary")
         aggregated = response.get("files", [])
 
@@ -87,7 +87,7 @@ with DAG(
 
     @task.r2index_upload(
         bucket=R2_BUCKET,
-        r2index_conn_id=R2_CONN_ID,
+        r2index_conn_id=R2INDEX_CONNECTION_ID,
         executor_config={"resources": POD_CONFIG_DEFAULT},
     )
     def upload_index(metadata_path: str) -> UploadItem:

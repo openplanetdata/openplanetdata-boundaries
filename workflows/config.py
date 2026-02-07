@@ -3,12 +3,7 @@ Configuration constants for OpenPlanetData Boundaries Airflow DAGs.
 """
 
 from kubernetes.client import models as k8s
-
-# =============================================================================
-# R2 Storage Configuration
-# =============================================================================
-R2_CONN_ID = "r2index-openplanetdata-production"
-R2_BUCKET = "openplanetdata"
+from openplanetdata.airflow.defaults import R2_BUCKET, R2INDEX_CONNECTION_ID
 
 # Remote file references (path, filename, version)
 PLANET_PBF_REF = ("osm/planet/pbf", "planet-latest.osm.pbf", "1")

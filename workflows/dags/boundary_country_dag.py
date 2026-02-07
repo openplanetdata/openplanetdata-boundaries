@@ -38,7 +38,7 @@ from workflows.config import (
     POD_CONFIG_BOUNDARY_EXTRACTION,
     POD_CONFIG_DEFAULT,
     R2_BUCKET,
-    R2_CONN_ID,
+    R2INDEX_CONNECTION_ID,
 )
 
 # Reference to coastline asset (consumed by this DAG)
@@ -79,7 +79,7 @@ with DAG(
 
     @task.r2index_download(
         bucket=R2_BUCKET,
-        r2index_conn_id=R2_CONN_ID,
+        r2index_conn_id=R2INDEX_CONNECTION_ID,
         executor_config=POD_CONFIG_DEFAULT,
     )
     def download_planet_gol() -> DownloadItem:
@@ -94,7 +94,7 @@ with DAG(
 
     @task.r2index_download(
         bucket=R2_BUCKET,
-        r2index_conn_id=R2_CONN_ID,
+        r2index_conn_id=R2INDEX_CONNECTION_ID,
         executor_config=POD_CONFIG_DEFAULT,
     )
     def download_coastline() -> DownloadItem:
@@ -220,7 +220,7 @@ with DAG(
             tags = COUNTRY_TAGS + [tag_name]
             extra = {"area_km2": result.area_km2} if result.area_km2 else None
 
-            hook = R2IndexHook(r2index_conn_id=R2_CONN_ID)
+            hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
             base_path = f"boundaries/countries/{country['code']}"
             filename_base = f"{country['code']}-latest.boundary"
 
