@@ -7,6 +7,7 @@ Produces Asset: coastline_gpkg (triggers downstream DAGs)
 
 import os
 import shutil
+import time
 from datetime import datetime, timedelta
 
 from airflow.sdk import DAG, Asset, task
@@ -210,6 +211,14 @@ with DAG(
         if os.path.exists(WORK_DIR):
             shutil.rmtree(WORK_DIR, ignore_errors=True)
 
+    @task
+    def test_live_logs() -> None:
+        """Temporary task to verify live log streaming from edge worker."""
+        for i in range(1, 31):
+            print(f"[log test] tick {i}/30")
+            time.sleep(2)
+        print("[log test] done")
+
     # Task flow
     conn_check = check_r2index_connection()
     download_result = download_planet_pbf()
@@ -222,3 +231,6 @@ with DAG(
     osmcoastline_done >> [parsed, geojson, parquet]
     [geojson, parquet] >> upload_result
     [parsed, upload_result] >> cleanup()
+
+    # Standalone test task — trigger manually, remove after verification
+    test_live_logs()
