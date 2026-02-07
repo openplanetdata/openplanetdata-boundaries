@@ -89,9 +89,12 @@ with DAG(
     export_geojson_op = DockerOperator(
         task_id="export_geojson",
         image=GEO_IMAGE,
-        command=["ogr2ogr", "-f", "GeoJSON", GEOJSON_PATH, GPKG_PATH,
-                 "-dialect", "SQLite", "-sql", SQL,
-                 "-nln", "planet_coastline", "-lco", "RFC7946=YES", "-lco", "COORDINATE_PRECISION=6"],
+        command=f"""bash -c "
+            ogr2ogr -f GeoJSON {GEOJSON_PATH} {GPKG_PATH} \
+                -dialect SQLite \
+                -sql \\"{SQL}\\" \
+                -nln planet_coastline -lco RFC7946=YES -lco COORDINATE_PRECISION=6
+        " """,
         mounts=[GEO_MOUNT],
         mount_tmp_dir=False,
         auto_remove="success",
@@ -100,9 +103,12 @@ with DAG(
     export_parquet_op = DockerOperator(
         task_id="export_parquet",
         image=GEO_IMAGE,
-        command=["ogr2ogr", "-f", "Parquet", PARQUET_PATH, GPKG_PATH,
-                 "-dialect", "SQLite", "-sql", SQL,
-                 "-nln", "planet_coastline", "-lco", "COMPRESSION=ZSTD"],
+        command=f"""bash -c "
+            ogr2ogr -f Parquet {PARQUET_PATH} {GPKG_PATH} \
+                -dialect SQLite \
+                -sql \\"{SQL}\\" \
+                -nln planet_coastline -lco COMPRESSION=ZSTD
+        " """,
         mounts=[GEO_MOUNT],
         mount_tmp_dir=False,
         auto_remove="success",
