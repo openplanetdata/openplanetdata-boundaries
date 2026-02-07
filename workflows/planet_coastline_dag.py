@@ -20,7 +20,7 @@ from openplanetdata.airflow.defaults import (
     SHARED_PLANET_OSM_PBF_PATH,
 )
 
-from workflows.config import R2_BUCKET, R2INDEX_CONNECTION_ID
+from openplanetdata.airflow.defaults import R2_BUCKET, R2INDEX_CONNECTION_ID
 from workflows.utils.osmcoastline_report import main as parse_osmcoastline_log
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/coastline"

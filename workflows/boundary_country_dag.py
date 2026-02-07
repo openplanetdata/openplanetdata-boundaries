@@ -27,18 +27,41 @@ from airflow.sdk import DAG, Asset, task
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
-
-from workflows.config import (
-    COASTLINE_GPKG_REF,
-    COUNTRY_TAGS,
-    MAX_PARALLEL_COUNTRIES,
-    PLANET_GOL_REF,
-    POD_CONFIG_BOUNDARY_EXTRACTION,
-    POD_CONFIG_DEFAULT,
-    R2_BUCKET,
-    R2INDEX_CONNECTION_ID,
-)
+from kubernetes.client import models as k8s
+from openplanetdata.airflow.defaults import R2_BUCKET, R2INDEX_CONNECTION_ID
 from workflows.data.countries import COUNTRIES
+
+COASTLINE_GPKG_REF = ("boundaries/coastline/geopackage", "planet-latest.coastline.gpkg", "1")
+COUNTRY_TAGS = ["boundary", "country", "openstreetmap", "public"]
+MAX_PARALLEL_COUNTRIES = 5
+PLANET_GOL_REF = ("osm/planet/gol", "planet-latest.osm.gol", "1")
+
+POD_CONFIG_DEFAULT = {
+    "pod_override": k8s.V1Pod(
+        spec=k8s.V1PodSpec(
+            containers=[k8s.V1Container(
+                name="base",
+                resources=k8s.V1ResourceRequirements(
+                    requests={"cpu": "100m", "memory": "256Mi"},
+                    limits={"cpu": "500m", "memory": "1Gi"},
+                ),
+            )]
+        )
+    )
+}
+POD_CONFIG_BOUNDARY_EXTRACTION = {
+    "pod_override": k8s.V1Pod(
+        spec=k8s.V1PodSpec(
+            containers=[k8s.V1Container(
+                name="base",
+                resources=k8s.V1ResourceRequirements(
+                    requests={"cpu": "1", "memory": "2Gi"},
+                    limits={"cpu": "4", "memory": "8Gi"},
+                ),
+            )]
+        )
+    )
+}
 
 # Reference to coastline asset (consumed by this DAG)
 coastline_gpkg = Asset(
