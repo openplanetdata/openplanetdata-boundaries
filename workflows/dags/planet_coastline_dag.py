@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from airflow.sdk import DAG, Asset, task
 from docker.types import Mount
 from elaunira.airflow.providers.r2index.operators import DownloadItem, UploadItem
+from elaunira.r2index.storage import R2TransferConfig
 
 from workflows.config import R2_BUCKET, R2_CONN_ID
 from workflows.utils.osmcoastline_report import main as parse_osmcoastline_log
@@ -92,7 +93,11 @@ with DAG(
             body = e.read().decode()
             raise RuntimeError(f"API check failed: HTTP {e.code} - {body}") from e
 
-    @task.r2index_download(bucket=R2_BUCKET, r2index_conn_id=R2_CONN_ID)
+    @task.r2index_download(
+        bucket=R2_BUCKET,
+        r2index_conn_id=R2_CONN_ID,
+        transfer_config=R2TransferConfig(max_concurrency=128),
+    )
     def download_planet_pbf() -> DownloadItem:
         """Download planet PBF from R2."""
         return DownloadItem(
