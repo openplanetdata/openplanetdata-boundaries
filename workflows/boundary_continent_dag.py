@@ -80,6 +80,8 @@ with DAG(
     dag_id="boundary_continent",
     default_args={
         "depends_on_past": False,
+        "email": ["support@openplanetdata.com"],
+        "email_on_failure": True,
         "execution_timeout": timedelta(hours=2),
         "owner": "openplanetdata",
         "retries": 2,
