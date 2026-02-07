@@ -32,7 +32,7 @@ from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from kubernetes.client import models as k8s
 from openplanetdata.airflow.defaults import R2_BUCKET, R2INDEX_CONNECTION_ID
-from workflows.data.continents import CONTINENTS
+from openplanetdata.airflow.data.continents import CONTINENTS
 
 COASTLINE_GPKG_REF = ("boundaries/coastline/geopackage", "planet-latest.coastline.gpkg", "1")
 CONTINENT_COOKIE_CUTTER_REF = ("boundaries/continents/cookie-cutter", "continent-cookie-cutter.gpkg", "1")
@@ -69,7 +69,7 @@ POD_CONFIG_CONTINENT_EXTRACTION = {
 # Reference to coastline asset (consumed by this DAG)
 coastline_gpkg = Asset(
     name="coastline_gpkg",
-    uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/latest/planet-latest.coastline.gpkg",
+    uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
 )
 
 WORK_DIR = "/data/openplanetdata/continent_boundaries"

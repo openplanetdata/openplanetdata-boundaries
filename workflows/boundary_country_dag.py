@@ -29,12 +29,12 @@ from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from kubernetes.client import models as k8s
 from openplanetdata.airflow.defaults import R2_BUCKET, R2INDEX_CONNECTION_ID
-from workflows.data.countries import COUNTRIES
+from openplanetdata.airflow.data.countries import COUNTRIES
 
-COASTLINE_GPKG_REF = ("boundaries/coastline/geopackage", "planet-latest.coastline.gpkg", "1")
+COASTLINE_GPKG_REF = ("boundaries/coastline/geopackage", "planet-latest.coastline.gpkg", "v1")
 COUNTRY_TAGS = ["boundary", "country", "openstreetmap", "public"]
 MAX_PARALLEL_COUNTRIES = 5
-PLANET_GOL_REF = ("osm/planet/gol", "planet-latest.osm.gol", "1")
+PLANET_GOL_REF = ("osm/planet/gol", "planet-latest.osm.gol", "v1")
 
 POD_CONFIG_DEFAULT = {
     "pod_override": k8s.V1Pod(
