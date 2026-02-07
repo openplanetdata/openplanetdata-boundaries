@@ -31,7 +31,7 @@ from airflow.sdk import DAG, Asset, task
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from kubernetes.client import models as k8s
-from openplanetdata.airflow.defaults import R2_BUCKET, R2INDEX_CONNECTION_ID
+from openplanetdata.airflow.defaults import ALERT_EMAIL, R2_BUCKET, R2INDEX_CONNECTION_ID
 from openplanetdata.airflow.data.continents import CONTINENTS
 
 COASTLINE_GPKG_REF = ("boundaries/coastline/geopackage", "planet-latest.coastline.gpkg", "1")
@@ -80,7 +80,7 @@ with DAG(
     dag_id="boundary_continent",
     default_args={
         "depends_on_past": False,
-        "email": ["support@openplanetdata.com"],
+        "email": [ALERT_EMAIL],
         "email_on_failure": True,
         "execution_timeout": timedelta(hours=2),
         "owner": "openplanetdata",
