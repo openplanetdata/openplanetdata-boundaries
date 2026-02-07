@@ -12,18 +12,16 @@ Required tools (provided by WORKER_IMAGE):
 
 Tasks:
 1. download_planet_gol / download_coastline - Download shared resources
-2. prepare_matrix - Load countries.json, return list of dicts
+2. prepare_matrix - Build country matrix from countries data
 3. extract_and_upload.expand() - Dynamic task mapping using shared extraction logic
 4. cleanup - Remove downloaded files
 """
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from airflow.sdk import DAG, Asset, task
 
@@ -40,6 +38,7 @@ from workflows.config import (
     R2_BUCKET,
     R2INDEX_CONNECTION_ID,
 )
+from workflows.data.countries import COUNTRIES
 
 # Reference to coastline asset (consumed by this DAG)
 coastline_gpkg = Asset(
@@ -47,16 +46,7 @@ coastline_gpkg = Asset(
     uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/latest/planet-latest.coastline.gpkg",
 )
 
-# Load countries data at module level for prepare_matrix
-COUNTRIES_JSON_PATH = Path(__file__).parent.parent / "data" / "countries.json"
-
 WORK_DIR = "/data/openplanetdata/country_boundaries"
-
-
-def load_countries() -> dict:
-    """Load countries from JSON file."""
-    with open(COUNTRIES_JSON_PATH) as f:
-        return json.load(f)
 
 
 with DAG(
@@ -133,7 +123,7 @@ with DAG(
         Returns:
             List of country dictionaries with code, name, osm_query, has_coastline
         """
-        countries = load_countries()
+        countries = COUNTRIES
 
         if country_codes:
             codes = [c.strip().upper() for c in country_codes.split(",") if c.strip()]
