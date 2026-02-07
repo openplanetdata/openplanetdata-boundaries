@@ -93,7 +93,7 @@ with DAG(
             destination=f"{WORK_DIR}/shared/planet-latest.osm.pbf",
             source_filename="planet-latest.osm.pbf",
             source_path="osm/planet/pbf",
-            source_version="1",
+            source_version="v1",
         )
 
     @task.bash
