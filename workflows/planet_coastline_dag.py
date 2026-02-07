@@ -74,6 +74,7 @@ with DAG(
         task_id="run_osmcoastline",
         image=OPENPLANETDATA_IMAGE,
         command=f"""bash -c '
+            mkdir -p {WORK_DIR} &&
             osmcoastline {SHARED_PLANET_OSM_PBF_PATH} \
                 -o {COASTLINE_GPKG_PATH} -g GPKG -p both -v -f \
                 2>&1 | tee {OSMCOASTLINE_LOG_PATH};
