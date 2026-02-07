@@ -93,7 +93,7 @@ with DAG(
 
     export_geojson = DockerOperator(
         task_id="export_geojson",
-        image=OPENPLANETDATA_IMAGE,
+        image="ghcr.io/osgeo/gdal:latest",
         command=f"""bash -c "
             ogr2ogr -f GeoJSON {COASTLINE_GEOJSON_PATH} {COASTLINE_GPKG_PATH} \
                 -dialect SQLite \
