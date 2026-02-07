@@ -30,7 +30,7 @@ PARQUET_PATH = f"{WORK_DIR}/coastline.parquet"
 SQL = "SELECT 'land' AS feature_class, a.* FROM land_polygons AS a UNION ALL SELECT 'water' AS feature_class, b.* FROM water_polygons AS b"
 
 # Geospatial tools run inside this Docker image via docker.sock
-GEO_IMAGE = "ghcr.io/openplanetdata/airflow:latest"
+GEO_IMAGE = "openplanetdata/openplanetdata-airflow:latest"
 GEO_MOUNT = Mount(source="/data/airflow", target="/data", type="bind")
 
 with DAG(
