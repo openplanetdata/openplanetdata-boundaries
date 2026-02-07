@@ -1,9 +1,9 @@
 CONTINENTS = [
-    {"slug": "africa", "name": "Africa"},
-    {"slug": "antarctica", "name": "Antarctica"},
-    {"slug": "asia", "name": "Asia"},
-    {"slug": "europe", "name": "Europe"},
-    {"slug": "north-america", "name": "North America"},
-    {"slug": "oceania", "name": "Oceania"},
-    {"slug": "south-america", "name": "South America"},
+    {"name": "Africa", "slug": "africa"},
+    {"name": "Antarctica", "slug": "antarctica"},
+    {"name": "Asia", "slug": "asia"},
+    {"name": "Europe", "slug": "europe"},
+    {"name": "North America", "slug": "north-america"},
+    {"name": "Oceania", "slug": "oceania"},
+    {"name": "South America", "slug": "south-america"},
 ]
