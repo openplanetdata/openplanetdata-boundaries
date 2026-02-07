@@ -113,7 +113,7 @@ with DAG(
         image=GEO_IMAGE,
         command=f"""bash -c '
             osmcoastline {WORK_DIR}/shared/planet-latest.osm.pbf \
-                -o {GPKG_PATH} -g GPKG -p both -v -f -e \
+                -o {GPKG_PATH} -g GPKG -p both -v -f \
                 2>&1 | tee {LOG_PATH};
             rc=${{PIPESTATUS[0]}};
             echo "osmcoastline completed with exit code $rc";
