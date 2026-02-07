@@ -8,6 +8,7 @@ Produces Asset: coastline_gpkg (triggers downstream DAGs)
 from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.sdk import DAG, Asset, task
 from datetime import timedelta
+import shutil
 from docker.types import Mount
 from elaunira.airflow.providers.r2index.operators import DownloadItem, UploadItem
 from elaunira.r2index.storage import R2TransferConfig
@@ -59,7 +60,7 @@ with DAG(
 
     OSMCOASTLINE_LOG_PATH = f"{WORK_DIR}/osmcoastline.log"
 
-    run_osmcoastline_op = DockerOperator(
+    run_osmcoastline = DockerOperator(
         task_id="run_osmcoastline",
         image=OPENPLANETDATA_IMAGE,
         command=f"""bash -c '
@@ -157,9 +158,14 @@ with DAG(
         ]
 
 
+    @task(trigger_rule="all_done")
+    def cleanup() -> None:
+        """Clean up working directory."""
+        shutil.rmtree(WORK_DIR, ignore_errors=True)
+
     # Task flow
     download_result = download_planet_pbf()
-    download_result >> run_osmcoastline_op
-    parsed = parse_osmcoastline_logs()
+    download_result >> run_osmcoastline
+    analyze_osmcoastline_logs = parse_osmcoastline_logs()
     upload_result = upload()
-    run_osmcoastline_op >> parsed >> [export_geojson, export_parquet] >> upload_result
+    run_osmcoastline >> analyze_osmcoastline_logs >> [export_geojson, export_parquet] >> upload_result >> cleanup()
