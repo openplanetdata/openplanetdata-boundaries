@@ -8,9 +8,10 @@ Produces Asset: coastline_gpkg (triggers downstream DAGs)
 import os
 import shutil
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from airflow.sdk import DAG, Asset, task
+from airflow.providers.docker.operators.docker import DockerOperator
 from docker.types import Mount
 from elaunira.airflow.providers.r2index.operators import DownloadItem, UploadItem
 from elaunira.r2index.storage import R2TransferConfig
@@ -107,65 +108,48 @@ with DAG(
             source_version="v1",
         )
 
-    @task.docker(image=GEO_IMAGE, mounts=[GEO_MOUNT], mount_tmp_dir=False, auto_remove="success")
-    def run_osmcoastline(download_result: list[dict]) -> None:
-        """Extract coastline from PBF using osmcoastline."""
-        import subprocess
-        import sys
-
-        pbf_path = download_result[0]["path"]
-
-        print(f"Running osmcoastline on {pbf_path}")
-        proc = subprocess.Popen(
-            ["osmcoastline", pbf_path, "-o", "/data/openplanetdata/coastline/coastline.gpkg",
-             "-g", "GPKG", "-p", "both", "-v", "-f", "-e"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-
-        with open("/data/openplanetdata/coastline/osmcoastline.log", "wb") as f:
-            for line in proc.stdout:
-                sys.stdout.buffer.write(line)
-                f.write(line)
-
-        if proc.wait() > 2:
-            raise RuntimeError(f"osmcoastline failed with exit code {proc.returncode}")
-        print(f"osmcoastline completed with exit code {proc.returncode}")
+    run_osmcoastline_op = DockerOperator(
+        task_id="run_osmcoastline",
+        image=GEO_IMAGE,
+        command=f"""bash -c '
+            osmcoastline {WORK_DIR}/shared/planet-latest.osm.pbf \
+                -o {GPKG_PATH} -g GPKG -p both -v -f -e \
+                2>&1 | tee {LOG_PATH};
+            rc=${{PIPESTATUS[0]}};
+            echo "osmcoastline completed with exit code $rc";
+            [ "$rc" -le 2 ]
+        '""",
+        mounts=[GEO_MOUNT],
+        mount_tmp_dir=False,
+        auto_remove="success",
+    )
 
     @task
     def parse_osmcoastline_logs() -> None:
         """Parse osmcoastline logs and print report."""
         parse_osmcoastline_log(LOG_PATH)
 
-    @task.docker(image=GEO_IMAGE, mounts=[GEO_MOUNT], mount_tmp_dir=False, auto_remove="success")
-    def export_geojson() -> None:
-        """Convert GeoPackage to GeoJSON."""
-        import subprocess
+    export_geojson_op = DockerOperator(
+        task_id="export_geojson",
+        image=GEO_IMAGE,
+        command=["ogr2ogr", "-f", "GeoJSON", GEOJSON_PATH, GPKG_PATH,
+                 "-dialect", "SQLite", "-sql", SQL,
+                 "-nln", "planet_coastline", "-lco", "RFC7946=YES", "-lco", "COORDINATE_PRECISION=6"],
+        mounts=[GEO_MOUNT],
+        mount_tmp_dir=False,
+        auto_remove="success",
+    )
 
-        subprocess.run(
-            ["ogr2ogr", "-f", "GeoJSON",
-             "/data/openplanetdata/coastline/coastline.geojson",
-             "/data/openplanetdata/coastline/coastline.gpkg",
-             "-dialect", "SQLite",
-             "-sql", "SELECT 'land' AS feature_class, a.* FROM land_polygons AS a UNION ALL SELECT 'water' AS feature_class, b.* FROM water_polygons AS b",
-             "-nln", "planet_coastline", "-lco", "RFC7946=YES", "-lco", "COORDINATE_PRECISION=6"],
-            check=True,
-        )
-
-    @task.docker(image=GEO_IMAGE, mounts=[GEO_MOUNT], mount_tmp_dir=False, auto_remove="success")
-    def export_parquet() -> None:
-        """Convert GeoPackage to GeoParquet."""
-        import subprocess
-
-        subprocess.run(
-            ["ogr2ogr", "-f", "Parquet",
-             "/data/openplanetdata/coastline/coastline.parquet",
-             "/data/openplanetdata/coastline/coastline.gpkg",
-             "-dialect", "SQLite",
-             "-sql", "SELECT 'land' AS feature_class, a.* FROM land_polygons AS a UNION ALL SELECT 'water' AS feature_class, b.* FROM water_polygons AS b",
-             "-nln", "planet_coastline", "-lco", "COMPRESSION=ZSTD"],
-            check=True,
-        )
+    export_parquet_op = DockerOperator(
+        task_id="export_parquet",
+        image=GEO_IMAGE,
+        command=["ogr2ogr", "-f", "Parquet", PARQUET_PATH, GPKG_PATH,
+                 "-dialect", "SQLite", "-sql", SQL,
+                 "-nln", "planet_coastline", "-lco", "COMPRESSION=ZSTD"],
+        mounts=[GEO_MOUNT],
+        mount_tmp_dir=False,
+        auto_remove="success",
+    )
 
     @task.r2index_upload(bucket=R2_BUCKET, r2index_conn_id=R2_CONN_ID, outlets=[coastline_gpkg])
     def upload() -> list[UploadItem]:
@@ -228,13 +212,11 @@ with DAG(
     conn_check = check_r2index_connection()
     download_result = download_planet_pbf()
     conn_check >> download_result
-    osmcoastline_done = run_osmcoastline(download_result)
+    download_result >> run_osmcoastline_op
     parsed = parse_osmcoastline_logs()
-    geojson = export_geojson()
-    parquet = export_parquet()
     upload_result = upload()
-    osmcoastline_done >> [parsed, geojson, parquet]
-    [geojson, parquet] >> upload_result
+    run_osmcoastline_op >> [parsed, export_geojson_op, export_parquet_op]
+    [export_geojson_op, export_parquet_op] >> upload_result
     [parsed, upload_result] >> cleanup()
 
     # Standalone test task — trigger manually, remove after verification
