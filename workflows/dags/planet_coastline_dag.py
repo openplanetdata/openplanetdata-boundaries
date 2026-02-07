@@ -10,6 +10,7 @@ import shutil
 from datetime import datetime, timedelta
 
 from airflow.sdk import DAG, Asset, task
+from docker.types import Mount
 from elaunira.airflow.providers.r2index.operators import DownloadItem, UploadItem
 
 from workflows.config import R2_BUCKET, R2_CONN_ID
@@ -27,6 +28,10 @@ LOG_PATH = f"{WORK_DIR}/osmcoastline.log"
 GEOJSON_PATH = f"{WORK_DIR}/coastline.geojson"
 PARQUET_PATH = f"{WORK_DIR}/coastline.parquet"
 SQL = "SELECT 'land' AS feature_class, a.* FROM land_polygons AS a UNION ALL SELECT 'water' AS feature_class, b.* FROM water_polygons AS b"
+
+# Geospatial tools run inside this Docker image via docker.sock
+GEO_IMAGE = "ghcr.io/openplanetdata/airflow:latest"
+GEO_MOUNT = Mount(source="/data/airflow", target="/data", type="bind")
 
 with DAG(
     dag_id="openplanetdata-planet-coastline",
@@ -96,49 +101,65 @@ with DAG(
             source_version="v1",
         )
 
-    @task.bash
-    def run_osmcoastline(download_result: list[dict]) -> str:
+    @task.docker(image=GEO_IMAGE, mounts=[GEO_MOUNT], mount_tmp_dir=False, auto_remove="success")
+    def run_osmcoastline(download_result: list[dict]) -> None:
         """Extract coastline from PBF using osmcoastline."""
+        import subprocess
+        import sys
+
         pbf_path = download_result[0]["path"]
-        return f"""
-            set -euo pipefail
-            echo "Running osmcoastline on {pbf_path}"
-            osmcoastline "{pbf_path}" -o {GPKG_PATH} -g GPKG -p both -v -f -e 2>&1 | tee {WORK_DIR}/osmcoastline.log
-            EXIT_CODE=${{PIPESTATUS[0]}}
-            if [ $EXIT_CODE -gt 2 ]; then
-                echo "osmcoastline failed with exit code $EXIT_CODE"
-                exit $EXIT_CODE
-            fi
-            echo "osmcoastline completed with exit code $EXIT_CODE"
-        """
+
+        print(f"Running osmcoastline on {pbf_path}")
+        proc = subprocess.Popen(
+            ["osmcoastline", pbf_path, "-o", "/data/openplanetdata/coastline/coastline.gpkg",
+             "-g", "GPKG", "-p", "both", "-v", "-f", "-e"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+
+        with open("/data/openplanetdata/coastline/osmcoastline.log", "wb") as f:
+            for line in proc.stdout:
+                sys.stdout.buffer.write(line)
+                f.write(line)
+
+        if proc.wait() > 2:
+            raise RuntimeError(f"osmcoastline failed with exit code {proc.returncode}")
+        print(f"osmcoastline completed with exit code {proc.returncode}")
 
     @task
     def parse_osmcoastline_logs() -> None:
         """Parse osmcoastline logs and print report."""
         parse_osmcoastline_log(LOG_PATH)
 
-    @task.bash
-    def export_geojson() -> str:
+    @task.docker(image=GEO_IMAGE, mounts=[GEO_MOUNT], mount_tmp_dir=False, auto_remove="success")
+    def export_geojson() -> None:
         """Convert GeoPackage to GeoJSON."""
-        return f"""
-            set -euo pipefail
-            export OGR_GEOJSON_MAX_OBJ_SIZE=0
-            echo "Exporting to GeoJSON..."
-            ogr2ogr -f GeoJSON {GEOJSON_PATH} {GPKG_PATH} \
-                -dialect SQLite -sql "{SQL}" \
-                -nln planet_coastline -lco RFC7946=YES -lco COORDINATE_PRECISION=6
-        """
+        import subprocess
 
-    @task.bash
-    def export_parquet() -> str:
+        subprocess.run(
+            ["ogr2ogr", "-f", "GeoJSON",
+             "/data/openplanetdata/coastline/coastline.geojson",
+             "/data/openplanetdata/coastline/coastline.gpkg",
+             "-dialect", "SQLite",
+             "-sql", "SELECT 'land' AS feature_class, a.* FROM land_polygons AS a UNION ALL SELECT 'water' AS feature_class, b.* FROM water_polygons AS b",
+             "-nln", "planet_coastline", "-lco", "RFC7946=YES", "-lco", "COORDINATE_PRECISION=6"],
+            check=True,
+        )
+
+    @task.docker(image=GEO_IMAGE, mounts=[GEO_MOUNT], mount_tmp_dir=False, auto_remove="success")
+    def export_parquet() -> None:
         """Convert GeoPackage to GeoParquet."""
-        return f"""
-            set -euo pipefail
-            echo "Exporting to GeoParquet..."
-            ogr2ogr -f Parquet {PARQUET_PATH} {GPKG_PATH} \
-                -dialect SQLite -sql "{SQL}" \
-                -nln planet_coastline -lco COMPRESSION=ZSTD
-        """
+        import subprocess
+
+        subprocess.run(
+            ["ogr2ogr", "-f", "Parquet",
+             "/data/openplanetdata/coastline/coastline.parquet",
+             "/data/openplanetdata/coastline/coastline.gpkg",
+             "-dialect", "SQLite",
+             "-sql", "SELECT 'land' AS feature_class, a.* FROM land_polygons AS a UNION ALL SELECT 'water' AS feature_class, b.* FROM water_polygons AS b",
+             "-nln", "planet_coastline", "-lco", "COMPRESSION=ZSTD"],
+            check=True,
+        )
 
     @task.r2index_upload(bucket=R2_BUCKET, r2index_conn_id=R2_CONN_ID, outlets=[coastline_gpkg])
     def upload() -> list[UploadItem]:
