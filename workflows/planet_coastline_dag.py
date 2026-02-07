@@ -14,13 +14,14 @@ from docker.types import Mount
 from elaunira.airflow.providers.r2index.operators import DownloadItem, UploadItem
 from elaunira.r2index.storage import R2TransferConfig
 from openplanetdata.airflow.defaults import (
+    ALERT_EMAIL,
     DOCKER_MOUNT,
     OPENPLANETDATA_IMAGE,
     OPENPLANETDATA_WORK_DIR,
+    R2_BUCKET,
+    R2INDEX_CONNECTION_ID,
     SHARED_PLANET_OSM_PBF_PATH,
 )
-
-from openplanetdata.airflow.defaults import ALERT_EMAIL, R2_BUCKET, R2INDEX_CONNECTION_ID
 from workflows.utils.osmcoastline_report import main as parse_osmcoastline_log
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/coastline"
@@ -106,7 +107,7 @@ with DAG(
 
     export_parquet = DockerOperator(
         task_id="export_parquet",
-        image=OPENPLANETDATA_IMAGE,
+        image="ghcr.io/osgeo/gdal:latest",
         command=f"""bash -c "
             ogr2ogr -f Parquet {COASTLINE_PARQUET_PATH} {COASTLINE_GPKG_PATH} \
                 -dialect SQLite \
