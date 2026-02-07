@@ -5,14 +5,20 @@ Schedule: Daily at 14:00 UTC
 Produces Asset: coastline_gpkg (triggers downstream DAGs)
 """
 
+import shutil
+from datetime import timedelta
+
 from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.sdk import DAG, Asset, task
-from datetime import timedelta
-import shutil
 from docker.types import Mount
 from elaunira.airflow.providers.r2index.operators import DownloadItem, UploadItem
 from elaunira.r2index.storage import R2TransferConfig
-from openplanetdata.airflow.defaults import DOCKER_MOUNT, OPENPLANETDATA_IMAGE, SHARED_PLANET_OSM_PBF_PATH
+from openplanetdata.airflow.defaults import (
+    DOCKER_MOUNT,
+    OPENPLANETDATA_IMAGE,
+    OPENPLANETDATA_WORK_DIR,
+    SHARED_PLANET_OSM_PBF_PATH,
+)
 
 from workflows.config import R2_BUCKET, R2INDEX_CONNECTION_ID
 from workflows.utils.osmcoastline_report import main as parse_osmcoastline_log
@@ -22,26 +28,30 @@ WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/coastline"
 COASTLINE_GPKG_PATH = f"{WORK_DIR}/coastline.gpkg"
 COASTLINE_GEOJSON_PATH = f"{WORK_DIR}/coastline.geojson"
 COASTLINE_PARQUET_PATH = f"{WORK_DIR}/coastline.parquet"
+OSMCOASTLINE_LOG_PATH = f"{WORK_DIR}/osmcoastline.log"
 
-SQL = "SELECT 'land' AS feature_class, a.* FROM land_polygons AS a UNION ALL SELECT 'water' AS feature_class, b.* FROM water_polygons AS b"
-
-WORK_DIR = "/data/openplanetdata"
+SQL = (
+    "SELECT 'land' AS feature_class, a.* FROM land_polygons AS a "
+    "UNION ALL "
+    "SELECT 'water' AS feature_class, b.* FROM water_polygons AS b"
+)
 
 with DAG(
-        dag_id="openplanetdata-planet-coastline",
-        default_args={
-            "execution_timeout": timedelta(hours=2),
-            "executor": "airflow.providers.edge3.executors.EdgeExecutor",
-            "owner": "openplanetdata",
-            "queue": "cortex",
-            "retries": 1,
-            "retry_delay": timedelta(minutes=5),
-        },
-        description="Daily planet coastline extraction from OSM planet PBF",
-        doc_md=__doc__,
-        schedule="0 14 * * *",
-        tags=["openplanetdata", "osm", "coastline"],
+    dag_id="openplanetdata-planet-coastline",
+    default_args={
+        "execution_timeout": timedelta(hours=2),
+        "executor": "airflow.providers.edge3.executors.EdgeExecutor",
+        "owner": "openplanetdata",
+        "queue": "cortex",
+        "retries": 1,
+        "retry_delay": timedelta(minutes=5),
+    },
+    description="Daily planet coastline extraction from OSM planet PBF",
+    doc_md=__doc__,
+    schedule="0 14 * * *",
+    tags=["openplanetdata", "osm", "coastline"],
 ) as dag:
+
     @task.r2index_download(
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
@@ -50,15 +60,12 @@ with DAG(
     def download_planet_pbf() -> DownloadItem:
         """Download planet PBF from R2."""
         return DownloadItem(
-            destination=f"{SHARED_PLANET_OSM_PBF_PATH}",
+            destination=SHARED_PLANET_OSM_PBF_PATH,
             overwrite=False,
             source_filename="planet-latest.osm.pbf",
             source_path="osm/planet/pbf",
             source_version="v1",
         )
-
-
-    OSMCOASTLINE_LOG_PATH = f"{WORK_DIR}/osmcoastline.log"
 
     run_osmcoastline = DockerOperator(
         task_id="run_osmcoastline",
@@ -76,12 +83,10 @@ with DAG(
         auto_remove="success",
     )
 
-
     @task
     def parse_osmcoastline_logs() -> None:
         """Parse osmcoastline logs and print report."""
         parse_osmcoastline_log(OSMCOASTLINE_LOG_PATH)
-
 
     export_geojson = DockerOperator(
         task_id="export_geojson",
@@ -111,10 +116,14 @@ with DAG(
         auto_remove="success",
     )
 
-    @task.r2index_upload(bucket=R2_BUCKET, outlets=[Asset(
-        name="openplanetdata-coastline-gpkg",
-        uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
-    )], r2index_conn_id=R2INDEX_CONNECTION_ID)
+    @task.r2index_upload(
+        bucket=R2_BUCKET,
+        outlets=[Asset(
+            name="openplanetdata-coastline-gpkg",
+            uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
+        )],
+        r2index_conn_id=R2INDEX_CONNECTION_ID,
+    )
     def upload() -> list[UploadItem]:
         """Upload all boundary formats to R2."""
         base_path = "boundaries/coastline"
@@ -156,7 +165,6 @@ with DAG(
                 tags=tags + ["geoparquet"],
             ),
         ]
-
 
     @task(trigger_rule="all_done")
     def cleanup() -> None:
