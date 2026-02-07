@@ -35,13 +35,13 @@ from workflows.config import (
     COASTLINE_GPKG_REF,
     CONTINENT_COOKIE_CUTTER_REF,
     CONTINENT_TAGS,
-    CONTINENTS,
     MAX_PARALLEL_CONTINENTS,
     POD_CONFIG_CONTINENT_EXTRACTION,
     POD_CONFIG_DEFAULT,
     R2_BUCKET,
     R2INDEX_CONNECTION_ID,
 )
+from workflows.data.continents import CONTINENTS
 
 # Reference to coastline asset (consumed by this DAG)
 coastline_gpkg = Asset(

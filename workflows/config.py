@@ -18,19 +18,6 @@ COUNTRIES_OUTPUT_PATH = "/boundaries/countries"
 CONTINENTS_OUTPUT_PATH = "/boundaries/continents"
 
 # =============================================================================
-# Continents list
-# =============================================================================
-CONTINENTS = [
-    {"slug": "africa", "name": "Africa"},
-    {"slug": "antarctica", "name": "Antarctica"},
-    {"slug": "asia", "name": "Asia"},
-    {"slug": "europe", "name": "Europe"},
-    {"slug": "north-america", "name": "North America"},
-    {"slug": "oceania", "name": "Oceania"},
-    {"slug": "south-america", "name": "South America"},
-]
-
-# =============================================================================
 # Pod Configurations for KubernetesExecutor
 # =============================================================================
 
