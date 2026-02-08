@@ -7,6 +7,7 @@ Produces Asset: coastline_gpkg (triggers downstream DAGs)
 
 import shutil
 from datetime import timedelta
+from pathlib import Path
 
 from airflow.exceptions import AirflowException
 from airflow.providers.docker.operators.docker import DockerOperator
@@ -30,6 +31,7 @@ WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/coastline"
 COASTLINE_GPKG_PATH = f"{WORK_DIR}/coastline.gpkg"
 COASTLINE_GEOJSON_PATH = f"{WORK_DIR}/coastline.geojson"
 COASTLINE_PARQUET_PATH = f"{WORK_DIR}/coastline.parquet"
+OSMCOASTLINE_EXIT_CODE_PATH = f"{WORK_DIR}/osmcoastline.exitcode"
 OSMCOASTLINE_LOG_PATH = f"{WORK_DIR}/osmcoastline.log"
 
 SQL = (
@@ -78,9 +80,9 @@ with DAG(
                 -o {COASTLINE_GPKG_PATH} -g GPKG -p both -v -f \
                 2>&1 | tee {OSMCOASTLINE_LOG_PATH};
             rc=${{PIPESTATUS[0]}};
+            echo "$rc" > {OSMCOASTLINE_EXIT_CODE_PATH};
             echo "osmcoastline completed with exit code $rc";
-            ls -lh {WORK_DIR};
-            [ "$rc" -le 2 ]
+            ls -lh {WORK_DIR}
         '""",
         force_pull=True,
         mounts=[Mount(**DOCKER_MOUNT)],
@@ -90,10 +92,11 @@ with DAG(
 
     @task(retries=0)
     def parse_osmcoastline_logs() -> None:
-        """Parse osmcoastline logs and print report. Fails if errors are found."""
-        error_count = parse_osmcoastline_log(OSMCOASTLINE_LOG_PATH, COASTLINE_GPKG_PATH)
-        if error_count > 0:
-            raise AirflowException(f"osmcoastline reported {error_count} error(s)")
+        """Parse osmcoastline logs and print report. Fails if exit code > 2."""
+        parse_osmcoastline_log(OSMCOASTLINE_LOG_PATH, COASTLINE_GPKG_PATH)
+        exit_code = int(Path(OSMCOASTLINE_EXIT_CODE_PATH).read_text().strip())
+        if exit_code > 2:
+            raise AirflowException(f"osmcoastline failed with exit code {exit_code}")
 
     export_geojson = DockerOperator(
         task_id="export_geojson",
