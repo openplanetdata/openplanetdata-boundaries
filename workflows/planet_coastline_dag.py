@@ -82,6 +82,7 @@ with DAG(
             ls -lh {WORK_DIR};
             [ "$rc" -le 2 ]
         '""",
+        force_pull=True,
         mounts=[Mount(**DOCKER_MOUNT)],
         mount_tmp_dir=False,
         auto_remove="success",
@@ -103,6 +104,7 @@ with DAG(
                 -sql \\"{SQL}\\" \
                 -nln planet_coastline -lco RFC7946=YES -lco COORDINATE_PRECISION=6
         " """,
+        force_pull=True,
         mounts=[Mount(**DOCKER_MOUNT)],
         mount_tmp_dir=False,
         auto_remove="success",
@@ -117,6 +119,7 @@ with DAG(
                 -sql \\"{SQL}\\" \
                 -nln planet_coastline -lco COMPRESSION=ZSTD
         " """,
+        force_pull=True,
         mounts=[Mount(**DOCKER_MOUNT)],
         mount_tmp_dir=False,
         auto_remove="success",
