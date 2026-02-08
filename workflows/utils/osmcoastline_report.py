@@ -109,15 +109,36 @@ def main(log_path_str: str, gpkg_path_str: str | None = None) -> int:
         if gpkg_path.exists():
             gpkg_errors = _query_gpkg_errors(gpkg_path)
 
-    def render_gpkg_errors():
+    ERROR_DESCRIPTIONS = {
+        "added_line": "synthetic segment inserted by osmcoastline to close a gap",
+        "direction": "coastline way going the wrong direction (land/water reversed)",
+        "fixed_end_point": "point where osmcoastline closed a gap in the coastline",
+        "intersection": "two coastline segments crossing each other",
+        "questionable": "coastline way flagged as suspicious (e.g. too small or oddly shaped)",
+        "tagged_node": "coastline node with extra OSM tags (informational)",
+    }
+
+    def _osm_link(osm_id, osm_type):
+        if osm_id == 0:
+            return ""
+        if osm_id >= rel_offset:
+            rel_id = osm_id - rel_offset
+            return f" https://www.openstreetmap.org/relation/{rel_id}"
+        return f" https://www.openstreetmap.org/{osm_type}/{osm_id}"
+
+    def render_gpkg_diagnostics():
         rendered_lines = []
+        osm_types = {"error_points": "node", "error_lines": "way"}
         for table in ("error_points", "error_lines"):
             entries = gpkg_errors[table]
             if entries:
                 rendered_lines.append(f"  {table} ({len(entries)}):")
+                osm_type = osm_types[table]
                 for osm_id, error in entries[:20]:
-                    url = f"https://www.openstreetmap.org/way/{osm_id}"
-                    rendered_lines.append(f"    • osm_id={osm_id} ({url}): {error}")
+                    link = _osm_link(osm_id, osm_type)
+                    desc = ERROR_DESCRIPTIONS.get(error, "")
+                    suffix = f" — {desc}" if desc else ""
+                    rendered_lines.append(f"    • osm_id={osm_id}{link} : {error}{suffix}")
                 if len(entries) > 20:
                     rendered_lines.append(f"    … (showing first 20 of {len(entries)})")
         return rendered_lines
@@ -133,10 +154,10 @@ def main(log_path_str: str, gpkg_path_str: str | None = None) -> int:
         *render(errors, "Errors", summary["errors"]),
     ]
 
-    gpkg_detail_lines = render_gpkg_errors()
+    gpkg_detail_lines = render_gpkg_diagnostics()
     if gpkg_detail_lines:
         output_lines.append("")
-        output_lines.append("GPKG error details:")
+        output_lines.append("GPKG diagnostics (data quality findings auto-handled by osmcoastline):")
         output_lines.extend(gpkg_detail_lines)
 
     output_lines.append("")
