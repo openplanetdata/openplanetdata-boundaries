@@ -1,17 +1,44 @@
 #!/usr/bin/env python3
 
 import re
+import sqlite3
 import sys
 from pathlib import Path
 
-def main(log_path_str: str) -> int:
+
+def _query_gpkg_errors(gpkg_path: Path) -> dict[str, list[tuple]]:
+    """Query error tables from osmcoastline output GeoPackage."""
+    result: dict[str, list[tuple]] = {"error_lines": [], "error_points": []}
+    try:
+        conn = sqlite3.connect(str(gpkg_path))
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('error_lines', 'error_points')"
+        )
+        tables = {row[0] for row in cursor.fetchall()}
+        for table in ("error_lines", "error_points"):
+            if table in tables:
+                cursor.execute(f"SELECT osm_id, error FROM {table}")  # noqa: S608
+                result[table] = cursor.fetchall()
+        conn.close()
+    except Exception as exc:
+        print(f"Warning: failed to query GPKG for error details: {exc}", file=sys.stderr)
+    return result
+
+
+def main(log_path_str: str, gpkg_path_str: str | None = None) -> int:
+    """Parse osmcoastline log and optionally query GPKG for error details.
+
+    Returns the number of errors reported by osmcoastline, or -1 on read failure.
+    """
     log_path = Path(log_path_str)
     try:
         with log_path.open(encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
     except OSError as exc:
         print(f"Failed to read log file {log_path}: {exc}", file=sys.stderr)
-        return 1
+        return -1
 
     warning_pat = re.compile(r"warning", re.IGNORECASE)
     error_pat = re.compile(r"error", re.IGNORECASE)
@@ -70,9 +97,29 @@ def main(log_path_str: str) -> int:
                 rendered_lines.append(f"  … (showing first 20 of {len(entries)} {label.lower()})")
         else:
             if reported_total:
-                rendered_lines.append(f"{label}: no detailed {label.lower()} lines captured, but osmcoastline reported {reported_total}.")
+                rendered_lines.append(f"{label}: no detailed {label.lower()} lines captured in log.")
             else:
                 rendered_lines.append(f"{label}: none.")
+        return rendered_lines
+
+    # Query GPKG for error details
+    gpkg_errors: dict[str, list[tuple]] = {"error_lines": [], "error_points": []}
+    if gpkg_path_str:
+        gpkg_path = Path(gpkg_path_str)
+        if gpkg_path.exists():
+            gpkg_errors = _query_gpkg_errors(gpkg_path)
+
+    def render_gpkg_errors():
+        rendered_lines = []
+        for table in ("error_points", "error_lines"):
+            entries = gpkg_errors[table]
+            if entries:
+                rendered_lines.append(f"  {table} ({len(entries)}):")
+                for osm_id, error in entries[:20]:
+                    url = f"https://www.openstreetmap.org/way/{osm_id}"
+                    rendered_lines.append(f"    • osm_id={osm_id} ({url}): {error}")
+                if len(entries) > 20:
+                    rendered_lines.append(f"    … (showing first 20 of {len(entries)})")
         return rendered_lines
 
     output_lines = [
@@ -84,16 +131,24 @@ def main(log_path_str: str) -> int:
         *render(warnings, "Warnings", summary["warnings"]),
         "",
         *render(errors, "Errors", summary["errors"]),
-        "",
-        "End of osmcoastline report",
     ]
 
+    gpkg_detail_lines = render_gpkg_errors()
+    if gpkg_detail_lines:
+        output_lines.append("")
+        output_lines.append("GPKG error details:")
+        output_lines.extend(gpkg_detail_lines)
+
+    output_lines.append("")
+    output_lines.append("End of osmcoastline report")
+
     print("\n".join(output_lines))
-    return 0
+    return summary["errors"]
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: osmcoastline-report.py <log_path>", file=sys.stderr)
+    if len(sys.argv) < 2:
+        print("Usage: osmcoastline-report.py <log_path> [gpkg_path]", file=sys.stderr)
         sys.exit(1)
-    sys.exit(main(sys.argv[1]))
+    gpkg = sys.argv[2] if len(sys.argv) > 2 else None
+    sys.exit(1 if main(sys.argv[1], gpkg) > 0 else 0)
