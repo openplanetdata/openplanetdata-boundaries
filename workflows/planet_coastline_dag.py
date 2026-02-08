@@ -8,14 +8,15 @@ Produces Asset: coastline_gpkg (triggers downstream DAGs)
 import shutil
 from datetime import timedelta
 
+from airflow.exceptions import AirflowException
 from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.sdk import DAG, Asset, task
 from docker.types import Mount
 from elaunira.airflow.providers.r2index.operators import DownloadItem, UploadItem
 from elaunira.r2index.storage import R2TransferConfig
 from openplanetdata.airflow.defaults import (
-    ALERT_EMAIL,
     DOCKER_MOUNT,
+    EMAIL_ALERT_RECIPIENTS,
     OPENPLANETDATA_IMAGE,
     OPENPLANETDATA_WORK_DIR,
     R2_BUCKET,
@@ -40,14 +41,12 @@ SQL = (
 with DAG(
     dag_id="openplanetdata-planet-coastline",
     default_args={
-        "email": [ALERT_EMAIL],
+        "email": [EMAIL_ALERT_RECIPIENTS],
         "email_on_failure": True,
         "execution_timeout": timedelta(hours=2),
         "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
-        "queue": "cortex",
-        "retries": 1,
-        "retry_delay": timedelta(minutes=5),
+        "queue": "cortex"
     },
     description="Daily planet coastline extraction from OSM planet PBF",
     doc_md=__doc__,
@@ -80,6 +79,7 @@ with DAG(
                 2>&1 | tee {OSMCOASTLINE_LOG_PATH};
             rc=${{PIPESTATUS[0]}};
             echo "osmcoastline completed with exit code $rc";
+            ls -lh {WORK_DIR};
             [ "$rc" -le 2 ]
         '""",
         mounts=[Mount(**DOCKER_MOUNT)],
@@ -87,10 +87,12 @@ with DAG(
         auto_remove="success",
     )
 
-    @task
+    @task(retries=0)
     def parse_osmcoastline_logs() -> None:
-        """Parse osmcoastline logs and print report."""
-        parse_osmcoastline_log(OSMCOASTLINE_LOG_PATH)
+        """Parse osmcoastline logs and print report. Fails if errors are found."""
+        error_count = parse_osmcoastline_log(OSMCOASTLINE_LOG_PATH, COASTLINE_GPKG_PATH)
+        if error_count > 0:
+            raise AirflowException(f"osmcoastline reported {error_count} error(s)")
 
     export_geojson = DockerOperator(
         task_id="export_geojson",
@@ -120,6 +122,10 @@ with DAG(
         auto_remove="success",
     )
 
+    UPLOAD_BASE_PATH = "boundaries/coastline"
+    UPLOAD_FILENAME_BASE = "planet-latest.coastline"
+    UPLOAD_TAGS = ["coastline", "openstreetmap", "private"]
+
     @task.r2index_upload(
         bucket=R2_BUCKET,
         outlets=[Asset(
@@ -128,47 +134,55 @@ with DAG(
         )],
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
-    def upload() -> list[UploadItem]:
-        """Upload all boundary formats to R2."""
-        base_path = "boundaries/coastline"
-        filename_base = "planet-latest.coastline"
-        tags = ["coastline", "openstreetmap", "private"]
+    def upload_gpkg() -> list[UploadItem]:
+        """Upload GeoPackage to R2."""
+        return [UploadItem(
+            category="coastline",
+            destination_filename=f"{UPLOAD_FILENAME_BASE}.gpkg",
+            destination_path=f"{UPLOAD_BASE_PATH}/geopackage",
+            destination_version="v1",
+            entity="planet",
+            extension="gpkg",
+            media_type="application/geopackage+sqlite3",
+            source=COASTLINE_GPKG_PATH,
+            tags=UPLOAD_TAGS + ["geopackage"],
+        )]
 
-        return [
-            UploadItem(
-                category="coastline",
-                destination_filename=f"{filename_base}.geojson",
-                destination_path=f"{base_path}/geojson",
-                destination_version="v1",
-                entity="planet",
-                extension="geojson",
-                media_type="application/geo+json",
-                source=COASTLINE_GEOJSON_PATH,
-                tags=tags + ["geojson"],
-            ),
-            UploadItem(
-                category="coastline",
-                destination_filename=f"{filename_base}.gpkg",
-                destination_path=f"{base_path}/geopackage",
-                destination_version="v1",
-                entity="planet",
-                extension="gpkg",
-                media_type="application/geopackage+sqlite3",
-                source=COASTLINE_GPKG_PATH,
-                tags=tags + ["geopackage"],
-            ),
-            UploadItem(
-                category="coastline",
-                destination_filename=f"{filename_base}.parquet",
-                destination_path=f"{base_path}/geoparquet",
-                destination_version="v1",
-                entity="planet",
-                extension="parquet",
-                media_type="application/vnd.apache.parquet",
-                source=COASTLINE_PARQUET_PATH,
-                tags=tags + ["geoparquet"],
-            ),
-        ]
+    @task.r2index_upload(
+        bucket=R2_BUCKET,
+        r2index_conn_id=R2INDEX_CONNECTION_ID,
+    )
+    def upload_geojson() -> list[UploadItem]:
+        """Upload GeoJSON to R2."""
+        return [UploadItem(
+            category="coastline",
+            destination_filename=f"{UPLOAD_FILENAME_BASE}.geojson",
+            destination_path=f"{UPLOAD_BASE_PATH}/geojson",
+            destination_version="v1",
+            entity="planet",
+            extension="geojson",
+            media_type="application/geo+json",
+            source=COASTLINE_GEOJSON_PATH,
+            tags=UPLOAD_TAGS + ["geojson"],
+        )]
+
+    @task.r2index_upload(
+        bucket=R2_BUCKET,
+        r2index_conn_id=R2INDEX_CONNECTION_ID,
+    )
+    def upload_geoparquet() -> list[UploadItem]:
+        """Upload GeoParquet to R2."""
+        return [UploadItem(
+            category="coastline",
+            destination_filename=f"{UPLOAD_FILENAME_BASE}.parquet",
+            destination_path=f"{UPLOAD_BASE_PATH}/geoparquet",
+            destination_version="v1",
+            entity="planet",
+            extension="parquet",
+            media_type="application/vnd.apache.parquet",
+            source=COASTLINE_PARQUET_PATH,
+            tags=UPLOAD_TAGS + ["geoparquet"],
+        )]
 
     @task(trigger_rule="all_done")
     def cleanup() -> None:
@@ -178,6 +192,15 @@ with DAG(
     # Task flow
     download_result = download_planet_pbf()
     download_result >> run_osmcoastline
-    analyze_osmcoastline_logs = parse_osmcoastline_logs()
-    upload_result = upload()
-    run_osmcoastline >> analyze_osmcoastline_logs >> [export_geojson, export_parquet] >> upload_result >> cleanup()
+    osmcoastline_logs_parse = parse_osmcoastline_logs()
+    run_osmcoastline >> osmcoastline_logs_parse
+
+    gpkg_upload = upload_gpkg()
+    geojson_upload = upload_geojson()
+    geoparquet_upload = upload_geoparquet()
+
+    osmcoastline_logs_parse >> gpkg_upload
+    osmcoastline_logs_parse >> export_geojson >> geojson_upload
+    osmcoastline_logs_parse >> export_parquet >> geoparquet_upload
+
+    [gpkg_upload, geojson_upload, geoparquet_upload] >> cleanup()
