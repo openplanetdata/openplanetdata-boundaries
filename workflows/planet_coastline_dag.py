@@ -28,6 +28,7 @@ from workflows.utils.osmcoastline_report import main as parse_osmcoastline_log
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/coastline"
 
 COASTLINE_GPKG_PATH = f"{WORK_DIR}/coastline.gpkg"
+COASTLINE_GPKG_COPY_PATH = f"{WORK_DIR}/coastline-copy.gpkg"
 COASTLINE_GEOJSON_PATH = f"{WORK_DIR}/coastline.geojson"
 COASTLINE_PARQUET_PATH = f"{WORK_DIR}/coastline.parquet"
 OSMCOASTLINE_EXIT_CODE_PATH = f"{WORK_DIR}/osmcoastline.exitcode"
@@ -95,6 +96,11 @@ with DAG(
         if exit_code > 2:
             raise AirflowException(f"osmcoastline failed with exit code {exit_code}")
 
+    @task
+    def copy_gpkg() -> None:
+        """Copy GPKG so exports can read in parallel without SQLite locks."""
+        shutil.copy2(COASTLINE_GPKG_PATH, COASTLINE_GPKG_COPY_PATH)
+
     export_geojson = DockerOperator(
         task_id="export_geojson",
         image="ghcr.io/osgeo/gdal:ubuntu-small-latest",
@@ -114,7 +120,7 @@ with DAG(
         task_id="export_parquet",
         image="ghcr.io/osgeo/gdal:ubuntu-full-latest",
         command=f"""bash -c "
-            ogr2ogr -f Parquet {COASTLINE_PARQUET_PATH} {COASTLINE_GPKG_PATH} \
+            ogr2ogr -f Parquet {COASTLINE_PARQUET_PATH} {COASTLINE_GPKG_COPY_PATH} \
                 -dialect SQLite \
                 -sql \\"{SQL}\\" \
                 -nln planet_coastline -lco COMPRESSION=ZSTD
@@ -204,6 +210,7 @@ with DAG(
 
     osmcoastline_logs_parse >> gpkg_upload
     osmcoastline_logs_parse >> export_geojson >> geojson_upload
-    export_geojson >> export_parquet >> geoparquet_upload
+    gpkg_copy = copy_gpkg()
+    osmcoastline_logs_parse >> gpkg_copy >> export_parquet >> geoparquet_upload
 
     [gpkg_upload, geojson_upload, geoparquet_upload] >> cleanup()
