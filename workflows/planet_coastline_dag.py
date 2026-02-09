@@ -204,6 +204,6 @@ with DAG(
 
     osmcoastline_logs_parse >> gpkg_upload
     osmcoastline_logs_parse >> export_geojson >> geojson_upload
-    osmcoastline_logs_parse >> export_parquet >> geoparquet_upload
+    export_geojson >> export_parquet >> geoparquet_upload
 
     [gpkg_upload, geojson_upload, geoparquet_upload] >> cleanup()
