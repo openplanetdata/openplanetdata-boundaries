@@ -163,6 +163,10 @@ with DAG(
     @task.r2index_upload(
         task_id="upload-geojson",
         bucket=R2_BUCKET,
+        outlets=[Asset(
+            name="openplanetdata-coastline-geojson",
+            uri=f"s3://{R2_BUCKET}/boundaries/coastline/geojson/v1/planet-latest.coastline.geojson",
+        )],
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
     def upload_geojson() -> list[UploadItem]:
@@ -182,6 +186,10 @@ with DAG(
     @task.r2index_upload(
         task_id="upload-geoparquet",
         bucket=R2_BUCKET,
+        outlets=[Asset(
+            name="openplanetdata-coastline-geoparquet",
+            uri=f"s3://{R2_BUCKET}/boundaries/coastline/geoparquet/v1/planet-latest.coastline.parquet",
+        )],
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
     def upload_geoparquet() -> list[UploadItem]:
