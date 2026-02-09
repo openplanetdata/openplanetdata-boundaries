@@ -77,7 +77,7 @@ WORK_DIR = "/data/openplanetdata/continent_boundaries"
 
 with DAG(
     catchup=False,
-    dag_id="boundary_continent",
+    dag_id="boundary-continent",
     default_args={
         "depends_on_past": False,
         "email": EMAIL_ALERT_RECIPIENTS,
@@ -95,12 +95,13 @@ with DAG(
     tags=["boundary", "continent", "osm", "monthly"],
 ) as dag:
 
-    @task(executor_config=POD_CONFIG_DEFAULT)
+    @task(task_id="get-date-tag", executor_config=POD_CONFIG_DEFAULT)
     def get_date_tag() -> str:
         """Generate date tag for file naming."""
         return datetime.utcnow().strftime("%Y%m%d")
 
     @task.r2index_download(
+        task_id="download-coastline",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
         executor_config=POD_CONFIG_DEFAULT,
@@ -116,6 +117,7 @@ with DAG(
         )
 
     @task.r2index_download(
+        task_id="download-cookie-cutter",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
         executor_config=POD_CONFIG_DEFAULT,
@@ -130,7 +132,7 @@ with DAG(
             source_version=cc_version,
         )
 
-    @task(executor_config=POD_CONFIG_DEFAULT)
+    @task(task_id="prepare-shared-resources", executor_config=POD_CONFIG_DEFAULT)
     def prepare_shared_resources(
         tag: str,
         coastline_result: list[dict],
@@ -144,7 +146,7 @@ with DAG(
             "tag": tag,
         }
 
-    @task(executor_config=POD_CONFIG_DEFAULT)
+    @task(task_id="prepare-continents", executor_config=POD_CONFIG_DEFAULT)
     def prepare_continents(continents_input: str | None = None) -> list[dict]:
         """
         Prepare the list of continents to process.
@@ -168,7 +170,7 @@ with DAG(
             ]
         return CONTINENTS.copy()
 
-    @task(executor_config=POD_CONFIG_CONTINENT_EXTRACTION)
+    @task(task_id="extract-and-upload-boundary", executor_config=POD_CONFIG_CONTINENT_EXTRACTION)
     def extract_and_upload_boundary(
         continent: dict,
         shared_resources: dict[str, str],

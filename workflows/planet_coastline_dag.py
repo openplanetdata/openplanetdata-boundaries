@@ -56,6 +56,7 @@ with DAG(
 ) as dag:
 
     @task.r2index_download(
+        task_id="download-planet-pbf",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
         transfer_config=R2TransferConfig(max_concurrency=64, multipart_chunksize=32 * 1024 * 1024),
@@ -71,7 +72,7 @@ with DAG(
         )
 
     run_osmcoastline = DockerOperator(
-        task_id="run_osmcoastline",
+        task_id="run-osmcoastline",
         image=OPENPLANETDATA_IMAGE,
         command=f"""bash -c '
             mkdir -p {WORK_DIR} &&
@@ -89,7 +90,7 @@ with DAG(
         auto_remove="success",
     )
 
-    @task(retries=0)
+    @task(task_id="parse-osmcoastline-logs", retries=0)
     def parse_osmcoastline_logs() -> None:
         """Parse osmcoastline logs and print report. Fails if exit code > 2."""
         parse_osmcoastline_log(OSMCOASTLINE_LOG_PATH, COASTLINE_GPKG_PATH)
@@ -97,13 +98,13 @@ with DAG(
         if exit_code > 2:
             raise AirflowException(f"osmcoastline failed with exit code {exit_code}")
 
-    @task
+    @task(task_id="copy-gpkg")
     def copy_gpkg() -> None:
         """Copy GPKG so exports can read in parallel without SQLite locks."""
         shutil.copy2(COASTLINE_GPKG_PATH, COASTLINE_GPKG_COPY_PATH)
 
     export_geojson = DockerOperator(
-        task_id="export_geojson",
+        task_id="export-geojson",
         image="ghcr.io/osgeo/gdal:ubuntu-small-latest",
         command=f"""bash -c "
             ogr2ogr -f GeoJSON {COASTLINE_GEOJSON_PATH} {COASTLINE_GPKG_PATH} \
@@ -118,7 +119,7 @@ with DAG(
     )
 
     export_parquet = DockerOperator(
-        task_id="export_parquet",
+        task_id="export-parquet",
         image="ghcr.io/osgeo/gdal:ubuntu-full-latest",
         command=f"""bash -c "
             ogr2ogr -f Parquet {COASTLINE_PARQUET_PATH} {COASTLINE_GPKG_COPY_PATH} \
@@ -137,6 +138,7 @@ with DAG(
     UPLOAD_TAGS = ["coastline", "openstreetmap", "private"]
 
     @task.r2index_upload(
+        task_id="upload-gpkg",
         bucket=R2_BUCKET,
         outlets=[Asset(
             name="openplanetdata-coastline-gpkg",
@@ -159,6 +161,7 @@ with DAG(
         )]
 
     @task.r2index_upload(
+        task_id="upload-geojson",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
@@ -177,6 +180,7 @@ with DAG(
         )]
 
     @task.r2index_upload(
+        task_id="upload-geoparquet",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
