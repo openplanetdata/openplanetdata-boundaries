@@ -112,7 +112,7 @@ with DAG(
 
     export_parquet = DockerOperator(
         task_id="export_parquet",
-        image="ghcr.io/osgeo/gdal:ubuntu-small-latest",
+        image="ghcr.io/osgeo/gdal:ubuntu-full-latest",
         command=f"""bash -c "
             ogr2ogr -f Parquet {COASTLINE_PARQUET_PATH} {COASTLINE_GPKG_PATH} \
                 -dialect SQLite \
