@@ -41,9 +41,10 @@ SQL = (
 )
 
 with DAG(
-    dag_id="openplanetdata-boundaries-coastline",
+    dag_display_name="OpenPlanetData Boundaries Planet Coastline",
+    dag_id="openplanetdata_boundaries_planet_coastline",
     default_args={
-        "execution_timeout": timedelta(hours=2),
+        "execution_timeout": timedelta(hours=1),
         "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
         "queue": "cortex"
@@ -52,11 +53,11 @@ with DAG(
     doc_md=__doc__,
     max_active_runs=1,
     schedule="0 14 * * *",
-    tags=["openplanetdata", "osm", "coastline"],
+    tags=["boundaries", "coastline", "openplanetdata", "planet"],
 ) as dag:
 
     @task.r2index_download(
-        task_id="download-planet-pbf",
+        task_display_name="Download Planet PBF",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
         transfer_config=R2TransferConfig(max_concurrency=64, multipart_chunksize=32 * 1024 * 1024),
@@ -72,7 +73,8 @@ with DAG(
         )
 
     run_osmcoastline = DockerOperator(
-        task_id="run-osmcoastline",
+        task_id="run_osmcoastline",
+        task_display_name="Run osmcoastline Binary",
         image=OPENPLANETDATA_IMAGE,
         command=f"""bash -c '
             mkdir -p {WORK_DIR} &&
@@ -90,7 +92,7 @@ with DAG(
         auto_remove="success",
     )
 
-    @task(task_id="parse-osmcoastline-logs", retries=0)
+    @task(task_display_name="Parse OSM Coastline Logs", retries=0)
     def parse_osmcoastline_logs() -> None:
         """Parse osmcoastline logs and print report. Fails if exit code > 2."""
         parse_osmcoastline_log(OSMCOASTLINE_LOG_PATH, COASTLINE_GPKG_PATH)
@@ -98,13 +100,14 @@ with DAG(
         if exit_code > 2:
             raise AirflowException(f"osmcoastline failed with exit code {exit_code}")
 
-    @task(task_id="copy-gpkg")
+    @task(task_display_name="Copy GPKG")
     def copy_gpkg() -> None:
         """Copy GPKG so exports can read in parallel without SQLite locks."""
         shutil.copy2(COASTLINE_GPKG_PATH, COASTLINE_GPKG_COPY_PATH)
 
     export_geojson = DockerOperator(
-        task_id="export-geojson",
+        task_id="export_geojson",
+        task_display_name="Export GeoJSON",
         image="ghcr.io/osgeo/gdal:ubuntu-small-latest",
         command=f"""bash -c "
             ogr2ogr -f GeoJSON {COASTLINE_GEOJSON_PATH} {COASTLINE_GPKG_PATH} \
@@ -119,7 +122,8 @@ with DAG(
     )
 
     export_parquet = DockerOperator(
-        task_id="export-parquet",
+        task_id="export_parquet",
+        task_display_name="Export GeoParquet",
         image="ghcr.io/osgeo/gdal:ubuntu-full-latest",
         command=f"""bash -c "
             ogr2ogr -f Parquet {COASTLINE_PARQUET_PATH} {COASTLINE_GPKG_COPY_PATH} \
@@ -138,7 +142,7 @@ with DAG(
     UPLOAD_TAGS = ["coastline", "openstreetmap", "private"]
 
     @task.r2index_upload(
-        task_id="upload-gpkg",
+        task_display_name="Upload GPKG",
         bucket=R2_BUCKET,
         outlets=[Asset(
             name="openplanetdata-coastline-gpkg",
@@ -161,7 +165,7 @@ with DAG(
         )]
 
     @task.r2index_upload(
-        task_id="upload-geojson",
+        task_display_name="Upload GeoJSON",
         bucket=R2_BUCKET,
         outlets=[Asset(
             name="openplanetdata-coastline-geojson",
@@ -184,7 +188,7 @@ with DAG(
         )]
 
     @task.r2index_upload(
-        task_id="upload-geoparquet",
+        task_display_name="Upload GeoParquet",
         bucket=R2_BUCKET,
         outlets=[Asset(
             name="openplanetdata-coastline-geoparquet",
@@ -206,7 +210,7 @@ with DAG(
             tags=UPLOAD_TAGS + ["geoparquet"],
         )]
 
-    @task(trigger_rule="all_done")
+    @task(task_display_name="Cleanup", trigger_rule="all_done")
     def cleanup() -> None:
         """Clean up working directory."""
         shutil.rmtree(WORK_DIR, ignore_errors=True)

@@ -74,7 +74,8 @@ WORK_DIR = "/data/openplanetdata/country_boundaries"
 
 with DAG(
     catchup=False,
-    dag_id="boundary-country",
+    dag_display_name="Boundary Country",
+    dag_id="boundary_country",
     default_args={
         "depends_on_past": False,
         "email": EMAIL_ALERT_RECIPIENTS,
@@ -93,7 +94,7 @@ with DAG(
 ) as dag:
 
     @task.r2index_download(
-        task_id="download-planet-gol",
+        task_display_name="Download Planet GOL",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
         executor_config=POD_CONFIG_DEFAULT,
@@ -109,7 +110,7 @@ with DAG(
         )
 
     @task.r2index_download(
-        task_id="download-coastline",
+        task_display_name="Download Coastline",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
         executor_config=POD_CONFIG_DEFAULT,
@@ -124,7 +125,7 @@ with DAG(
             source_version=coast_version,
         )
 
-    @task(task_id="prepare-shared-resources", executor_config=POD_CONFIG_DEFAULT)
+    @task(task_display_name="Prepare Shared Resources", executor_config=POD_CONFIG_DEFAULT)
     def prepare_shared_resources(
         gol_result: list[dict],
         coastline_result: list[dict],
@@ -136,7 +137,7 @@ with DAG(
             "coastline_gpkg": coastline_result[0]["path"],
         }
 
-    @task(task_id="prepare-matrix", executor_config=POD_CONFIG_DEFAULT)
+    @task(task_display_name="Prepare Matrix", executor_config=POD_CONFIG_DEFAULT)
     def prepare_matrix(country_codes: str | None = None) -> list[dict]:
         """
         Prepare the matrix of countries to process.
@@ -181,7 +182,7 @@ with DAG(
 
         return matrix
 
-    @task(task_id="extract-and-upload-boundary", executor_config=POD_CONFIG_BOUNDARY_EXTRACTION)
+    @task(task_display_name="Extract and Upload Boundary", executor_config=POD_CONFIG_BOUNDARY_EXTRACTION)
     def extract_and_upload_boundary(
         country: dict,
         shared_resources: dict[str, str],
@@ -271,6 +272,7 @@ with DAG(
         return extraction_result
 
     @task(
+        task_display_name="Cleanup",
         trigger_rule="all_done",
         executor_config=POD_CONFIG_DEFAULT,
     )
