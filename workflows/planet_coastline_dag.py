@@ -17,7 +17,6 @@ from elaunira.airflow.providers.r2index.operators import DownloadItem, UploadIte
 from elaunira.r2index.storage import R2TransferConfig
 from openplanetdata.airflow.defaults import (
     DOCKER_MOUNT,
-    EMAIL_ALERT_RECIPIENTS,
     OPENPLANETDATA_IMAGE,
     OPENPLANETDATA_WORK_DIR,
     R2_BUCKET,
@@ -43,8 +42,6 @@ SQL = (
 with DAG(
     dag_id="openplanetdata-planet-coastline",
     default_args={
-        "email": EMAIL_ALERT_RECIPIENTS,
-        "email_on_failure": True,
         "execution_timeout": timedelta(hours=2),
         "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
