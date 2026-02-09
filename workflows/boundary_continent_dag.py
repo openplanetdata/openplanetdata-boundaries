@@ -30,41 +30,12 @@ from airflow.sdk import DAG, Asset, task
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
-from kubernetes.client import models as k8s
-from openplanetdata.airflow.defaults import EMAIL_ALERT_RECIPIENTS, R2_BUCKET, R2INDEX_CONNECTION_ID
+from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
 from openplanetdata.airflow.data.continents import CONTINENTS
 
-COASTLINE_GPKG_REF = ("boundaries/coastline/geopackage", "planet-latest.coastline.gpkg", "1")
 CONTINENT_COOKIE_CUTTER_REF = ("boundaries/continents/cookie-cutter", "continent-cookie-cutter.gpkg", "1")
 CONTINENT_TAGS = ["boundary", "continent", "openstreetmap", "public"]
 MAX_PARALLEL_CONTINENTS = 3
-
-POD_CONFIG_DEFAULT = {
-    "pod_override": k8s.V1Pod(
-        spec=k8s.V1PodSpec(
-            containers=[k8s.V1Container(
-                name="base",
-                resources=k8s.V1ResourceRequirements(
-                    requests={"cpu": "100m", "memory": "256Mi"},
-                    limits={"cpu": "500m", "memory": "1Gi"},
-                ),
-            )]
-        )
-    )
-}
-POD_CONFIG_CONTINENT_EXTRACTION = {
-    "pod_override": k8s.V1Pod(
-        spec=k8s.V1PodSpec(
-            containers=[k8s.V1Container(
-                name="base",
-                resources=k8s.V1ResourceRequirements(
-                    requests={"cpu": "1", "memory": "2Gi"},
-                    limits={"cpu": "4", "memory": "8Gi"},
-                ),
-            )]
-        )
-    )
-}
 
 # Reference to coastline asset (consumed by this DAG)
 coastline_gpkg = Asset(
@@ -72,40 +43,34 @@ coastline_gpkg = Asset(
     uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
 )
 
-WORK_DIR = "/data/openplanetdata/continent_boundaries"
+WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/continents"
 
 
 with DAG(
     catchup=False,
-    dag_display_name="Boundary Continent",
-    dag_id="boundary_continent",
+    dag_display_name="OpenPlanetData Boundaries Continents",
+    dag_id="openplanetdata_boundaries_continents",
     default_args={
         "depends_on_past": False,
-        "email": EMAIL_ALERT_RECIPIENTS,
-        "email_on_failure": True,
         "execution_timeout": timedelta(hours=2),
+        "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
+        "queue": "cortex",
         "retries": 2,
         "retry_delay": timedelta(minutes=10),
     },
     description="Monthly continent boundary extraction from OSM coastline",
     doc_md=__doc__,
     max_active_tasks=MAX_PARALLEL_CONTINENTS,
+    max_active_runs=1,
     schedule="0 5 1 * *",
-    start_date=datetime(2024, 1, 1),
-    tags=["boundary", "continent", "osm", "monthly"],
+    tags=["boundaries", "continents", "openplanetdata"],
 ) as dag:
-
-    @task(task_display_name="Get Date Tag", executor_config=POD_CONFIG_DEFAULT)
-    def get_date_tag() -> str:
-        """Generate date tag for file naming."""
-        return datetime.utcnow().strftime("%Y%m%d")
 
     @task.r2index_download(
         task_display_name="Download Coastline",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
-        executor_config=POD_CONFIG_DEFAULT,
     )
     def download_coastline() -> DownloadItem:
         """Download coastline GPKG from R2."""
@@ -121,7 +86,6 @@ with DAG(
         task_display_name="Download Cookie Cutter",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
-        executor_config=POD_CONFIG_DEFAULT,
     )
     def download_cookie_cutter() -> DownloadItem:
         """Download continent cookie-cutter GPKG from R2."""
@@ -133,7 +97,7 @@ with DAG(
             source_version=cc_version,
         )
 
-    @task(task_display_name="Prepare Shared Resources", executor_config=POD_CONFIG_DEFAULT)
+    @task(task_display_name="Prepare Shared Resources")
     def prepare_shared_resources(
         tag: str,
         coastline_result: list[dict],
@@ -147,7 +111,7 @@ with DAG(
             "tag": tag,
         }
 
-    @task(task_display_name="Prepare Continents", executor_config=POD_CONFIG_DEFAULT)
+    @task(task_display_name="Prepare Continents")
     def prepare_continents(continents_input: str | None = None) -> list[dict]:
         """
         Prepare the list of continents to process.
@@ -171,7 +135,7 @@ with DAG(
             ]
         return CONTINENTS.copy()
 
-    @task(task_display_name="Extract and Upload Boundary", executor_config=POD_CONFIG_CONTINENT_EXTRACTION)
+    @task(task_display_name="Extract and Upload Boundary")
     def extract_and_upload_boundary(
         continent: dict,
         shared_resources: dict[str, str],
@@ -265,7 +229,6 @@ with DAG(
     @task(
         task_display_name="Cleanup",
         trigger_rule="all_done",
-        executor_config=POD_CONFIG_DEFAULT,
     )
     def cleanup(shared_resources: dict[str, str], results: list[dict]) -> None:
         """Clean up temporary files."""

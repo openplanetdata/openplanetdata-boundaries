@@ -27,7 +27,6 @@ from airflow.sdk import DAG, Asset, task
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
-from kubernetes.client import models as k8s
 from openplanetdata.airflow.defaults import EMAIL_ALERT_RECIPIENTS, R2_BUCKET, R2INDEX_CONNECTION_ID
 from openplanetdata.airflow.data.countries import COUNTRIES
 
@@ -35,33 +34,6 @@ COASTLINE_GPKG_REF = ("boundaries/coastline/geopackage", "planet-latest.coastlin
 COUNTRY_TAGS = ["boundary", "country", "openstreetmap", "public"]
 MAX_PARALLEL_COUNTRIES = 5
 PLANET_GOL_REF = ("osm/planet/gol", "planet-latest.osm.gol", "v1")
-
-POD_CONFIG_DEFAULT = {
-    "pod_override": k8s.V1Pod(
-        spec=k8s.V1PodSpec(
-            containers=[k8s.V1Container(
-                name="base",
-                resources=k8s.V1ResourceRequirements(
-                    requests={"cpu": "100m", "memory": "256Mi"},
-                    limits={"cpu": "500m", "memory": "1Gi"},
-                ),
-            )]
-        )
-    )
-}
-POD_CONFIG_BOUNDARY_EXTRACTION = {
-    "pod_override": k8s.V1Pod(
-        spec=k8s.V1PodSpec(
-            containers=[k8s.V1Container(
-                name="base",
-                resources=k8s.V1ResourceRequirements(
-                    requests={"cpu": "1", "memory": "2Gi"},
-                    limits={"cpu": "4", "memory": "8Gi"},
-                ),
-            )]
-        )
-    )
-}
 
 # Reference to coastline asset (consumed by this DAG)
 coastline_gpkg = Asset(
@@ -81,7 +53,9 @@ with DAG(
         "email": EMAIL_ALERT_RECIPIENTS,
         "email_on_failure": True,
         "execution_timeout": timedelta(hours=1),
+        "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
+        "queue": "cortex",
         "retries": 2,
         "retry_delay": timedelta(minutes=10),
     },
@@ -97,7 +71,6 @@ with DAG(
         task_display_name="Download Planet GOL",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
-        executor_config=POD_CONFIG_DEFAULT,
     )
     def download_planet_gol() -> DownloadItem:
         """Download planet GOL from R2."""
@@ -113,7 +86,6 @@ with DAG(
         task_display_name="Download Coastline",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
-        executor_config=POD_CONFIG_DEFAULT,
     )
     def download_coastline() -> DownloadItem:
         """Download coastline GPKG from R2."""
@@ -125,7 +97,7 @@ with DAG(
             source_version=coast_version,
         )
 
-    @task(task_display_name="Prepare Shared Resources", executor_config=POD_CONFIG_DEFAULT)
+    @task(task_display_name="Prepare Shared Resources")
     def prepare_shared_resources(
         gol_result: list[dict],
         coastline_result: list[dict],
@@ -137,7 +109,7 @@ with DAG(
             "coastline_gpkg": coastline_result[0]["path"],
         }
 
-    @task(task_display_name="Prepare Matrix", executor_config=POD_CONFIG_DEFAULT)
+    @task(task_display_name="Prepare Matrix")
     def prepare_matrix(country_codes: str | None = None) -> list[dict]:
         """
         Prepare the matrix of countries to process.
@@ -182,7 +154,7 @@ with DAG(
 
         return matrix
 
-    @task(task_display_name="Extract and Upload Boundary", executor_config=POD_CONFIG_BOUNDARY_EXTRACTION)
+    @task(task_display_name="Extract and Upload Boundary")
     def extract_and_upload_boundary(
         country: dict,
         shared_resources: dict[str, str],
@@ -274,7 +246,6 @@ with DAG(
     @task(
         task_display_name="Cleanup",
         trigger_rule="all_done",
-        executor_config=POD_CONFIG_DEFAULT,
     )
     def cleanup(shared_resources: dict[str, str], results: list[dict]) -> None:
         """Clean up temporary files."""
