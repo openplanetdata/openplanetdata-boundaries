@@ -41,7 +41,7 @@ SQL = (
 )
 
 with DAG(
-    dag_id="openplanetdata-planet-coastline",
+    dag_id="openplanetdata-boundaries-coastline",
     default_args={
         "execution_timeout": timedelta(hours=2),
         "executor": "airflow.providers.edge3.executors.EdgeExecutor",
