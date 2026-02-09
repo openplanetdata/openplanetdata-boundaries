@@ -145,7 +145,7 @@ with DAG(
         task_display_name="Upload GPKG",
         bucket=R2_BUCKET,
         outlets=[Asset(
-            name="openplanetdata-coastline-gpkg",
+            name="openplanetdata-boundaries-coastline-gpkg",
             uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
         )],
         r2index_conn_id=R2INDEX_CONNECTION_ID,
@@ -168,7 +168,7 @@ with DAG(
         task_display_name="Upload GeoJSON",
         bucket=R2_BUCKET,
         outlets=[Asset(
-            name="openplanetdata-coastline-geojson",
+            name="openplanetdata-boundaries-coastline-geojson",
             uri=f"s3://{R2_BUCKET}/boundaries/coastline/geojson/v1/planet-latest.coastline.geojson",
         )],
         r2index_conn_id=R2INDEX_CONNECTION_ID,
@@ -191,7 +191,7 @@ with DAG(
         task_display_name="Upload GeoParquet",
         bucket=R2_BUCKET,
         outlets=[Asset(
-            name="openplanetdata-coastline-geoparquet",
+            name="openplanetdata-boundaries-coastline-geoparquet",
             uri=f"s3://{R2_BUCKET}/boundaries/coastline/geoparquet/v1/planet-latest.coastline.parquet",
         )],
         r2index_conn_id=R2INDEX_CONNECTION_ID,
