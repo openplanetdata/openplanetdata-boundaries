@@ -33,9 +33,8 @@ from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
 from openplanetdata.airflow.data.continents import CONTINENTS
 
-CONTINENT_COOKIE_CUTTER_REF = ("boundaries/continents/cookie-cutter", "continent-cookie-cutter.gpkg", "1")
+CONTINENT_COOKIE_CUTTER_REF = ("", "continent-cookie-cutter.gpkg", "1")
 CONTINENT_TAGS = ["boundary", "continent", "openstreetmap", "public"]
-MAX_PARALLEL_CONTINENTS = 3
 
 # Reference to coastline asset (consumed by this DAG)
 coastline_gpkg = Asset(
@@ -51,17 +50,14 @@ with DAG(
     dag_display_name="OpenPlanetData Boundaries Continents",
     dag_id="openplanetdata_boundaries_continents",
     default_args={
-        "depends_on_past": False,
         "execution_timeout": timedelta(hours=2),
         "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
         "queue": "cortex",
-        "retries": 2,
-        "retry_delay": timedelta(minutes=10),
     },
     description="Monthly continent boundary extraction from OSM coastline",
     doc_md=__doc__,
-    max_active_tasks=MAX_PARALLEL_CONTINENTS,
+    max_active_tasks=3,
     max_active_runs=1,
     schedule="0 5 1 * *",
     tags=["boundaries", "continents", "openplanetdata"],
@@ -74,12 +70,11 @@ with DAG(
     )
     def download_coastline() -> DownloadItem:
         """Download coastline GPKG from R2."""
-        coast_path, coast_filename, coast_version = COASTLINE_GPKG_REF
         return DownloadItem(
             destination=os.path.join(WORK_DIR, "planet-latest.coastline.gpkg"),
-            source_filename=coast_filename,
-            source_path=coast_path,
-            source_version=coast_version,
+            source_filename="planet-latest.coastline.parquet",
+            source_path="boundaries/coastline/geoparquet",
+            source_version="v1",
         )
 
     @task.r2index_download(
@@ -89,17 +84,15 @@ with DAG(
     )
     def download_cookie_cutter() -> DownloadItem:
         """Download continent cookie-cutter GPKG from R2."""
-        cc_path, cc_filename, cc_version = CONTINENT_COOKIE_CUTTER_REF
         return DownloadItem(
             destination=os.path.join(WORK_DIR, "continent-cookie-cutter.gpkg"),
-            source_filename=cc_filename,
-            source_path=cc_path,
-            source_version=cc_version,
+            source_filename="continent-cookie-cutter.gpkg",
+            source_path="boundaries/continents/cookie-cutter",
+            source_version="",
         )
 
     @task(task_display_name="Prepare Shared Resources")
     def prepare_shared_resources(
-        tag: str,
         coastline_result: list[dict],
         cookie_cutter_result: list[dict],
     ) -> dict[str, str]:
@@ -107,16 +100,13 @@ with DAG(
         return {
             "work_dir": WORK_DIR,
             "coastline_gpkg": coastline_result[0]["path"],
-            "cookie_cutter_gpkg": cookie_cutter_result[0]["path"],
-            "tag": tag,
+            "cookie_cutter_gpkg": cookie_cutter_result[0]["path"]
         }
 
     @task(task_display_name="Prepare Continents")
     def prepare_continents(continents_input: str | None = None) -> list[dict]:
         """
         Prepare the list of continents to process.
-
-        This is equivalent to the 'prepare' job in boundary-continent.yaml.
 
         Args:
             continents_input: Optional comma-separated list of continent slugs.
@@ -153,10 +143,10 @@ with DAG(
             Dict with extraction result
         """
         work_dir = shared_resources["work_dir"]
-        tag = shared_resources["tag"]
         coastline_gpkg = shared_resources["coastline_gpkg"]
         cookie_cutter_gpkg = shared_resources["cookie_cutter_gpkg"]
 
+        tag = datetime.utcnow().strftime("%Y%m%d")
         output_dir = os.path.join(work_dir, "output", tag)
         os.makedirs(output_dir, exist_ok=True)
 
@@ -245,10 +235,9 @@ with DAG(
                 print(f"  Failed: {r.get('continent', {}).get('slug')} - {r.get('failure_reason')}")
 
     # Define task flow
-    tag = get_date_tag()
     coastline_result = download_coastline()
     cookie_cutter_result = download_cookie_cutter()
-    shared = prepare_shared_resources(tag, coastline_result, cookie_cutter_result)
+    shared = prepare_shared_resources(coastline_result, cookie_cutter_result)
     continents = prepare_continents()
 
     # Dynamic task mapping - similar to GitHub's matrix strategy
