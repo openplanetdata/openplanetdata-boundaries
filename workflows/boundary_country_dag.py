@@ -50,6 +50,7 @@ with DAG(
     description="Monthly country boundary extraction from OSM",
     doc_md=__doc__,
     max_active_runs=1,
+    max_active_tasks=20,
     schedule="0 4 1 * *",
     tags=["boundaries", "countries", "openplanetdata"],
 ) as dag:
