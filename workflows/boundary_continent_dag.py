@@ -2,20 +2,19 @@
 Continent Boundary DAG - Monthly continent boundary extraction.
 
 Schedule: Monthly 1st at 05:00 UTC
-Source: .github/workflows/boundary-continent.yaml
-Consumes Asset: coastline_gpkg
+Consumes: coastline GeoParquet from R2
 
-Required tools (provided by WORKER_IMAGE):
-- ogr2ogr, ogrinfo: Geometry operations and format conversions
-- python3 with pyproj: Area calculations and metadata
+Required tools on worker: ogr2ogr, python3 with pyproj
 
 Continents: africa, antarctica, asia, europe, north-america, oceania, south-america
 
-Tasks:
-1. download_coastline / download_cookie_cutter - Download shared resources
-2. prepare_continents - Return list of continent dicts
-3. extract_and_upload.expand() - Dynamic mapping for parallel continent processing
-4. cleanup - Remove temporary files
+Per-continent pipeline:
+1. Clip coastline by continent cookie-cutter (Docker ogr2ogr)
+2. Dissolve clipped polygons into single geometry (Docker ogr2ogr)
+3. Compute geodesic area and export final GeoPackage (worker ogr2ogr + pyproj)
+4. Export GeoJSON and GeoParquet in parallel (Docker ogr2ogr)
+5. Normalize GeoJSON to single Feature
+6. Upload all formats to R2
 """
 
 from __future__ import annotations
@@ -23,25 +22,24 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from datetime import datetime, timedelta
-from pathlib import Path
-
-from airflow.sdk import DAG, Asset, task
+from datetime import timedelta
+from airflow.exceptions import AirflowException
+from airflow.sdk import DAG, task
+from airflow.utils.task_group import TaskGroup
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
-from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
 from openplanetdata.airflow.data.continents import CONTINENTS
+from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
+from workflows.operators.ogr2ogr import Ogr2OgrOperator
+from workflows.utils.compute_area import compute_area_km2
+from workflows.utils.normalize_single_feature import normalize_geojson as normalize_to_single_feature
 
-CONTINENT_TAGS = ["boundary", "continent", "openstreetmap", "public"]
-
-# Reference to coastline asset (consumed by this DAG)
-coastline_gpkg = Asset(
-    name="coastline_gpkg",
-    uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
-)
+CONTINENT_TAGS = ["boundaries", "continents", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/continents"
+COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.gpkg"
+COOKIE_CUTTER_PATH = f"{WORK_DIR}/continent-cookie-cutter.gpkg"
 
 
 with DAG(
@@ -68,9 +66,9 @@ with DAG(
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
     def download_coastline() -> DownloadItem:
-        """Download coastline GPKG from R2."""
+        """Download coastline data from R2."""
         return DownloadItem(
-            destination=os.path.join(WORK_DIR, "planet-latest.coastline.gpkg"),
+            destination=COASTLINE_PATH,
             source_filename="planet-latest.coastline.parquet",
             source_path="boundaries/coastline/geoparquet",
             source_version="v1",
@@ -84,164 +82,162 @@ with DAG(
     def download_cookie_cutter() -> DownloadItem:
         """Download continent cookie-cutter GPKG from R2."""
         return DownloadItem(
-            destination=os.path.join(WORK_DIR, "continent-cookie-cutter.gpkg"),
+            destination=COOKIE_CUTTER_PATH,
             source_filename="continent-cookie-cutter.gpkg",
             source_path="boundaries/continents",
         )
 
-    @task(task_display_name="Prepare Shared Resources")
-    def prepare_shared_resources(
-        coastline_result: list[dict],
-        cookie_cutter_result: list[dict],
-    ) -> dict[str, str]:
-        """Combine download results into shared resources dict."""
-        return {
-            "work_dir": WORK_DIR,
-            "coastline_gpkg": coastline_result[0]["path"],
-            "cookie_cutter_gpkg": cookie_cutter_result[0]["path"]
-        }
+    @task(task_display_name="Prepare Directories")
+    def prepare_directories() -> None:
+        """Create working directories for all continents."""
+        os.makedirs(f"{WORK_DIR}/output", exist_ok=True)
+        for continent in CONTINENTS:
+            os.makedirs(f"{WORK_DIR}/{continent['slug']}", exist_ok=True)
 
-    @task(task_display_name="Prepare Continents")
-    def prepare_continents(continents_input: str | None = None) -> list[dict]:
-        """
-        Prepare the list of continents to process.
+    @task(task_display_name="Compute Area and Export GPKG")
+    def compute_area_and_export_gpkg(
+        slug: str,
+        db_key: str,
+        dissolved_path: str,
+        output_gpkg: str,
+    ) -> None:
+        """Export dissolved geometry to GeoJSON, compute geodesic area, then export GPKG with area."""
+        dissolved_geojson = dissolved_path.replace(".gpkg", ".geojson")
 
-        Args:
-            continents_input: Optional comma-separated list of continent slugs.
-                              If empty, processes all continents.
-
-        Returns:
-            List of continent dictionaries with slug and name
-        """
-        if continents_input:
-            slugs = [c.strip().lower() for c in continents_input.split(",") if c.strip()]
-            slug_to_name = {c["slug"]: c["name"] for c in CONTINENTS}
-            return [
-                {"slug": slug, "name": slug_to_name[slug]}
-                for slug in slugs
-                if slug in slug_to_name
-            ]
-        return CONTINENTS.copy()
-
-    @task(task_display_name="Extract and Upload Boundary")
-    def extract_and_upload_boundary(
-        continent: dict,
-        shared_resources: dict[str, str],
-    ) -> dict:
-        """
-        Extract and upload boundary for a single continent.
-
-        Requires: ogr2ogr, ogrinfo, python3 with pyproj (from IMAGE_GDAL)
-
-        Args:
-            continent: Continent dict with slug and name
-            shared_resources: Dict with paths to shared resources
-
-        Returns:
-            Dict with extraction result
-        """
-        work_dir = shared_resources["work_dir"]
-        coastline_gpkg = shared_resources["coastline_gpkg"]
-        cookie_cutter_gpkg = shared_resources["cookie_cutter_gpkg"]
-
-        tag = datetime.utcnow().strftime("%Y%m%d")
-        output_dir = os.path.join(work_dir, "output", tag)
-        os.makedirs(output_dir, exist_ok=True)
-
-        output_basename = os.path.join(output_dir, f"{continent['slug']}-latest.boundary")
-
-        # Get the script path (the reusable extraction logic)
-        script_path = Path(__file__).parent.parent / "utils" / "create_continent_boundary.sh"
-
-        # Run the shell script
-        result = subprocess.run(
-            [
-                str(script_path),
-                continent["slug"],
-                cookie_cutter_gpkg,
-                coastline_gpkg,
-                output_basename,
-            ],
-            capture_output=True,
-            text=True,
-            cwd=work_dir,
+        subprocess.run(
+            ["ogr2ogr", "-f", "GeoJSON", dissolved_geojson, dissolved_path, "dissolved"],
+            check=True,
             env={**os.environ, "OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
         )
 
-        extraction_result = {
-            "continent": continent,
-            "success": result.returncode == 0,
-            "gpkg_path": f"{output_basename}.gpkg" if result.returncode == 0 else None,
-            "geojson_path": f"{output_basename}.geojson" if result.returncode == 0 else None,
-            "parquet_path": f"{output_basename}.parquet" if result.returncode == 0 else None,
-            "failure_reason": result.stderr if result.returncode != 0 else None,
-        }
+        area_km2 = compute_area_km2(dissolved_geojson)
+        if area_km2 is None:
+            raise AirflowException(f"Failed to compute geodesic area for {slug}")
 
-        # Upload if successful
-        if extraction_result["success"]:
-            slug = continent["slug"]
-            tags = CONTINENT_TAGS + [slug]
+        sql = f"SELECT geom, continent, CAST({area_km2} AS REAL) AS area FROM dissolved"
+        subprocess.run(
+            [
+                "ogr2ogr", "-f", "GPKG", output_gpkg, dissolved_path,
+                "-dialect", "sqlite", "-sql", sql, "-nln", slug,
+            ],
+            check=True,
+        )
 
-            hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
-            base_path = f"boundaries/continents/{slug}"
-            filename_base = f"{slug}-latest.boundary"
+    @task(task_display_name="Normalize GeoJSON")
+    def normalize_geojson(geojson_path: str) -> None:
+        """Normalize GeoJSON FeatureCollection to a single Feature."""
+        normalize_to_single_feature(geojson_path)
 
-            upload_results = {}
-            formats = [
-                (extraction_result["geojson_path"], "geojson", "application/geo+json", "geojson"),
-                (extraction_result["gpkg_path"], "gpkg", "application/geopackage+sqlite3", "geopackage"),
-                (extraction_result["parquet_path"], "parquet", "application/vnd.apache.parquet", "geoparquet"),
-            ]
+    @task(task_display_name="Upload File")
+    def upload_file(
+        slug: str,
+        source: str,
+        ext: str,
+        media_type: str,
+        subfolder: str,
+    ) -> dict:
+        """Upload a single format variant to R2."""
+        hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
+        return hook.upload(
+            bucket=R2_BUCKET,
+            category="boundary",
+            destination_filename=f"{slug}-latest.boundary.{ext}",
+            destination_path=f"boundaries/continents/{slug}/{subfolder}",
+            destination_version="1",
+            entity=slug,
+            extension=ext,
+            media_type=media_type,
+            source=source,
+            tags=CONTINENT_TAGS + [slug, subfolder],
+        )
 
-            for local_path, ext, media_type, subfolder in formats:
-                if local_path and Path(local_path).exists():
-                    record = hook.upload(
-                        bucket=R2_BUCKET,
-                        category="boundary",
-                        destination_filename=f"{filename_base}.{ext}",
-                        destination_path=f"{base_path}/{subfolder}",
-                        destination_version="1",
-                        entity=slug,
-                        extension=ext,
-                        media_type=media_type,
-                        source=local_path,
-                        tags=tags + [subfolder],
-                    )
-                    upload_results[ext] = record["id"]
+    @task(task_display_name="Cleanup", trigger_rule="all_done")
+    def cleanup() -> None:
+        """Clean up working directory."""
+        shutil.rmtree(WORK_DIR, ignore_errors=True)
 
-            extraction_result["uploaded"] = True
-            extraction_result["upload_results"] = upload_results
+    # Task flow
+    dirs = prepare_directories()
+    coastline_dl = download_coastline()
+    cookie_dl = download_cookie_cutter()
+    dirs >> [coastline_dl, cookie_dl]
 
-        return extraction_result
+    upload_tasks = []
 
-    @task(
-        task_display_name="Cleanup",
-        trigger_rule="all_done",
-    )
-    def cleanup(shared_resources: dict[str, str], results: list[dict]) -> None:
-        """Clean up temporary files."""
-        work_dir = shared_resources.get("work_dir")
-        if work_dir and os.path.exists(work_dir):
-            shutil.rmtree(work_dir, ignore_errors=True)
+    for continent in CONTINENTS:
+        slug = continent["slug"]
+        db_key = slug.replace("-", "_")
 
-        # Log summary
-        successful = sum(1 for r in results if r.get("success"))
-        failed = len(results) - successful
-        print(f"Extraction complete: {successful} successful, {failed} failed")
-        for r in results:
-            if not r.get("success"):
-                print(f"  Failed: {r.get('continent', {}).get('slug')} - {r.get('failure_reason')}")
+        tmp_dir = f"{WORK_DIR}/{slug}"
+        clipped_path = f"{tmp_dir}/clipped.gpkg"
+        dissolved_path = f"{tmp_dir}/dissolved.gpkg"
+        output_basename = f"{WORK_DIR}/output/{slug}-latest.boundary"
+        output_gpkg = f"{output_basename}.gpkg"
+        output_geojson = f"{output_basename}.geojson"
+        output_parquet = f"{output_basename}.parquet"
 
-    # Define task flow
-    coastline_result = download_coastline()
-    cookie_cutter_result = download_cookie_cutter()
-    shared = prepare_shared_resources(coastline_result, cookie_cutter_result)
-    continents = prepare_continents()
+        with TaskGroup(group_id=slug):
+            clip = Ogr2OgrOperator(
+                task_id="clip_coastline",
+                task_display_name="Clip Coastline",
+                args=[
+                    "-f", "GPKG", clipped_path,
+                    COASTLINE_PATH, "land_polygons",
+                    "-clipsrc", COOKIE_CUTTER_PATH,
+                    "-clipsrclayer", "continent_cutter",
+                    "-clipsrcwhere", f"continent = '{db_key}'",
+                    "-nln", "clipped",
+                ],
+            )
 
-    # Dynamic task mapping - similar to GitHub's matrix strategy
-    results = extract_and_upload_boundary.expand(
-        continent=continents,
-        shared_resources=[shared],  # Broadcast shared resources
-    )
+            dissolve = Ogr2OgrOperator(
+                task_id="dissolve_polygons",
+                task_display_name="Dissolve Polygons",
+                args=[
+                    "-f", "GPKG", dissolved_path, clipped_path,
+                    "-dialect", "sqlite",
+                    "-sql", f"SELECT ST_Union(geom) AS geom, '{db_key}' AS continent FROM clipped",
+                    "-nln", "dissolved",
+                ],
+            )
 
-    cleanup(shared, results)
+            area_gpkg = compute_area_and_export_gpkg(
+                slug, db_key, dissolved_path, output_gpkg,
+            )
+
+            export_geojson_op = Ogr2OgrOperator(
+                task_id="export_geojson",
+                task_display_name="Export GeoJSON",
+                environment={"OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
+                args=[
+                    "-f", "GeoJSON", output_geojson,
+                    output_gpkg, slug,
+                    "-nln", slug,
+                ],
+            )
+
+            normalize = normalize_geojson(output_geojson)
+
+            export_parquet_op = Ogr2OgrOperator(
+                task_id="export_parquet",
+                task_display_name="Export GeoParquet",
+                args=[
+                    "-f", "Parquet", output_parquet,
+                    output_gpkg, slug,
+                    "-nln", slug,
+                ],
+            )
+
+            upload_gpkg = upload_file(slug, output_gpkg, "gpkg", "application/geopackage+sqlite3", "geopackage")
+            upload_geojson = upload_file(slug, output_geojson, "geojson", "application/geo+json", "geojson")
+            upload_parquet = upload_file(slug, output_parquet, "parquet", "application/vnd.apache.parquet", "geoparquet")
+
+            # Dependencies
+            [coastline_dl, cookie_dl] >> clip >> dissolve >> area_gpkg
+            area_gpkg >> [export_geojson_op, export_parquet_op, upload_gpkg]
+            export_geojson_op >> normalize >> upload_geojson
+            export_parquet_op >> upload_parquet
+
+            upload_tasks += [upload_gpkg, upload_geojson, upload_parquet]
+
+    upload_tasks >> cleanup()

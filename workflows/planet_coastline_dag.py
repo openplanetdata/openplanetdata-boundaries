@@ -15,6 +15,7 @@ from airflow.sdk import DAG, Asset, task
 from docker.types import Mount
 from elaunira.airflow.providers.r2index.operators import DownloadItem, UploadItem
 from elaunira.r2index.storage import R2TransferConfig
+from workflows.operators.ogr2ogr import Ogr2OgrOperator
 from openplanetdata.airflow.defaults import (
     DOCKER_MOUNT,
     OPENPLANETDATA_IMAGE,
@@ -105,36 +106,29 @@ with DAG(
         """Copy GPKG so exports can read in parallel without SQLite locks."""
         shutil.copy2(COASTLINE_GPKG_PATH, COASTLINE_GPKG_COPY_PATH)
 
-    export_geojson = DockerOperator(
+    export_geojson = Ogr2OgrOperator(
         task_id="export_geojson",
         task_display_name="Export GeoJSON",
         image="ghcr.io/osgeo/gdal:ubuntu-small-latest",
-        command=f"""bash -c "
-            ogr2ogr -f GeoJSON {COASTLINE_GEOJSON_PATH} {COASTLINE_GPKG_PATH} \
-                -dialect SQLite \
-                -sql \\"{SQL}\\" \
-                -nln planet_coastline -lco RFC7946=YES -lco COORDINATE_PRECISION=6
-        " """,
-        force_pull=True,
-        mounts=[Mount(**DOCKER_MOUNT)],
-        mount_tmp_dir=False,
-        auto_remove="success",
+        args=[
+            "-f", "GeoJSON",
+            COASTLINE_GEOJSON_PATH, COASTLINE_GPKG_PATH,
+            "-dialect", "SQLite", "-sql", SQL,
+            "-nln", "planet_coastline",
+            "-lco", "RFC7946=YES", "-lco", "COORDINATE_PRECISION=6",
+        ],
     )
 
-    export_parquet = DockerOperator(
+    export_parquet = Ogr2OgrOperator(
         task_id="export_parquet",
         task_display_name="Export GeoParquet",
-        image="ghcr.io/osgeo/gdal:ubuntu-full-latest",
-        command=f"""bash -c "
-            ogr2ogr -f Parquet {COASTLINE_PARQUET_PATH} {COASTLINE_GPKG_COPY_PATH} \
-                -dialect SQLite \
-                -sql \\"{SQL}\\" \
-                -nln planet_coastline -lco COMPRESSION=ZSTD
-        " """,
-        force_pull=True,
-        mounts=[Mount(**DOCKER_MOUNT)],
-        mount_tmp_dir=False,
-        auto_remove="success",
+        args=[
+            "-f", "Parquet",
+            COASTLINE_PARQUET_PATH, COASTLINE_GPKG_COPY_PATH,
+            "-dialect", "SQLite", "-sql", SQL,
+            "-nln", "planet_coastline",
+            "-lco", "COMPRESSION=ZSTD",
+        ],
     )
 
     UPLOAD_BASE_PATH = "boundaries/coastline"
