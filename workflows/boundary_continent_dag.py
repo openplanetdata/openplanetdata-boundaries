@@ -28,7 +28,6 @@ from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.data.continents import CONTINENTS
 from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
 from workflows.operators.ogr2ogr import Ogr2OgrOperator
-from workflows.utils.dag_run import check_dag_run_failures
 
 CONTINENT_TAGS = ["boundaries", "continents", "openplanetdata"]
 
@@ -117,11 +116,14 @@ with DAG(
             tags=CONTINENT_TAGS + [slug, subfolder],
         )
 
+    @task(task_display_name="Done")
+    def done() -> None:
+        """No-op gate task to propagate upstream failures to DAG run state."""
+
     @task(task_display_name="Cleanup", trigger_rule="all_done")
-    def cleanup(**context) -> None:
-        """Clean up working directory. Fails if any upstream task failed."""
+    def cleanup() -> None:
+        """Clean up working directory."""
         shutil.rmtree(WORK_DIR, ignore_errors=True)
-        check_dag_run_failures(context)
 
     # Task flow
     dirs = prepare_directories()
@@ -214,4 +216,5 @@ with DAG(
 
             upload_tasks += [upload_gpkg, upload_geojson, upload_parquet]
 
+    upload_tasks >> done()
     upload_tasks >> cleanup()

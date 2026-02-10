@@ -24,7 +24,6 @@ from openplanetdata.airflow.defaults import (
     R2INDEX_CONNECTION_ID,
     SHARED_PLANET_OSM_PBF_PATH,
 )
-from workflows.utils.dag_run import check_dag_run_failures
 from workflows.utils.osmcoastline_report import main as parse_osmcoastline_log
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/coastline"
@@ -205,11 +204,14 @@ with DAG(
             tags=UPLOAD_TAGS + ["geoparquet"],
         )]
 
+    @task(task_display_name="Done")
+    def done() -> None:
+        """No-op gate task to propagate upstream failures to DAG run state."""
+
     @task(task_display_name="Cleanup", trigger_rule="all_done")
-    def cleanup(**context) -> None:
-        """Clean up working directory. Fails if any upstream task failed."""
+    def cleanup() -> None:
+        """Clean up working directory."""
         shutil.rmtree(WORK_DIR, ignore_errors=True)
-        check_dag_run_failures(context)
 
     # Task flow
     download_result = download_planet_pbf()
@@ -226,4 +228,5 @@ with DAG(
     gpkg_copy = copy_gpkg()
     osmcoastline_logs_parse >> gpkg_copy >> export_parquet >> geoparquet_upload
 
+    [gpkg_upload, geojson_upload, geoparquet_upload] >> done()
     [gpkg_upload, geojson_upload, geoparquet_upload] >> cleanup()
