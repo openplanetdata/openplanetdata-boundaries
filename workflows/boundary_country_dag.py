@@ -92,9 +92,23 @@ with DAG(
     @task(task_display_name="Normalize GeoJSON")
     def normalize_geojson(geojson_path: str) -> None:
         """Normalize GeoJSON FeatureCollection to a single Feature."""
-        from workflows.utils.normalize_single_feature import normalize_geojson as normalize_to_single_feature
+        import json
 
-        normalize_to_single_feature(geojson_path)
+        with open(geojson_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+
+        if data.get("type") == "FeatureCollection":
+            features = data.get("features") or []
+            if not features:
+                raise ValueError("No features found in FeatureCollection")
+            feature = features[0]
+        elif data.get("type") == "Feature":
+            feature = data
+        else:
+            raise ValueError(f"Unsupported GeoJSON type: {data.get('type')}")
+
+        with open(geojson_path, "w", encoding="utf-8") as fh:
+            json.dump(feature, fh, ensure_ascii=False, separators=(",", ":"))
 
     @task(task_display_name="Upload File")
     def upload_file(

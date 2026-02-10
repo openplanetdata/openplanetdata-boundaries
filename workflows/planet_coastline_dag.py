@@ -24,7 +24,6 @@ from openplanetdata.airflow.defaults import (
     R2INDEX_CONNECTION_ID,
     SHARED_PLANET_OSM_PBF_PATH,
 )
-from workflows.utils.osmcoastline_report import main as parse_osmcoastline_log
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/coastline"
 
@@ -96,6 +95,15 @@ with DAG(
     @task(task_display_name="Parse OSM Coastline Logs", retries=0)
     def parse_osmcoastline_logs() -> None:
         """Parse osmcoastline logs and print report. Fails if exit code > 2."""
+        import sys
+        from pathlib import Path
+
+        bundle_root = str(Path(__file__).resolve().parent.parent)
+        if bundle_root not in sys.path:
+            sys.path.insert(0, bundle_root)
+
+        from workflows.utils.osmcoastline_report import main as parse_osmcoastline_log
+
         parse_osmcoastline_log(OSMCOASTLINE_LOG_PATH, COASTLINE_GPKG_PATH)
         exit_code = int(Path(OSMCOASTLINE_EXIT_CODE_PATH).read_text().strip())
         if exit_code > 2:
