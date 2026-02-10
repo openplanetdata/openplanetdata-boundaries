@@ -83,7 +83,6 @@ with DAG(
     @task(task_display_name="Prepare Directories")
     def prepare_directories() -> None:
         """Create working directories for all continents."""
-        os.makedirs(f"{WORK_DIR}/output", exist_ok=True)
         for continent in CONTINENTS:
             os.makedirs(f"{WORK_DIR}/{continent['slug']}", exist_ok=True)
 
@@ -137,7 +136,7 @@ with DAG(
         tmp_dir = f"{WORK_DIR}/{slug}"
         clipped_path = f"{tmp_dir}/clipped.gpkg"
         dissolved_path = f"{tmp_dir}/dissolved.gpkg"
-        output_basename = f"{WORK_DIR}/output/{slug}-latest.boundary"
+        output_basename = f"{tmp_dir}/{slug}-latest.boundary"
         output_gpkg = f"{output_basename}.gpkg"
         output_geojson = f"{output_basename}.geojson"
         output_parquet = f"{output_basename}.parquet"
