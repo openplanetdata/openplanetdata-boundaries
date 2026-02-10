@@ -87,7 +87,6 @@ with DAG(
             destination=os.path.join(WORK_DIR, "continent-cookie-cutter.gpkg"),
             source_filename="continent-cookie-cutter.gpkg",
             source_path="boundaries/continents",
-            source_version="",
         )
 
     @task(task_display_name="Prepare Shared Resources")
