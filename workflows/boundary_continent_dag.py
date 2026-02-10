@@ -145,7 +145,7 @@ with DAG(
             category="boundary",
             destination_filename=f"{slug}-latest.boundary.{ext}",
             destination_path=f"boundaries/continents/{slug}/{subfolder}",
-            destination_version="1",
+            destination_version="v1",
             entity=slug,
             extension=ext,
             media_type=media_type,
