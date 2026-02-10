@@ -156,7 +156,7 @@ with DAG(
                 task_id="extract_boundary",
                 task_display_name="Extract Boundary",
                 image=OPENPLANETDATA_IMAGE,
-                command=f'bash -c "gol query {SHARED_PLANET_OSM_GOL_PATH} a[\\"ISO3166-1:alpha2\\"=\\"{code}\\"] -f geojson > {raw_geojson}"',
+                command=["bash", "-c", f'gol query {SHARED_PLANET_OSM_GOL_PATH} \'a["ISO3166-1:alpha2"="{code}"]\' -f geojson > {raw_geojson}'],
                 auto_remove="success",
                 force_pull=True,
                 mount_tmp_dir=False,
