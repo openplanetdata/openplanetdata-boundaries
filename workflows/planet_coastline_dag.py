@@ -24,6 +24,7 @@ from openplanetdata.airflow.defaults import (
     R2INDEX_CONNECTION_ID,
     SHARED_PLANET_OSM_PBF_PATH,
 )
+from workflows.utils.dag_run import check_dag_run_failures
 from workflows.utils.osmcoastline_report import main as parse_osmcoastline_log
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/coastline"
@@ -205,9 +206,10 @@ with DAG(
         )]
 
     @task(task_display_name="Cleanup", trigger_rule="all_done")
-    def cleanup() -> None:
-        """Clean up working directory."""
+    def cleanup(**context) -> None:
+        """Clean up working directory. Fails if any upstream task failed."""
         shutil.rmtree(WORK_DIR, ignore_errors=True)
+        check_dag_run_failures(context)
 
     # Task flow
     download_result = download_planet_pbf()

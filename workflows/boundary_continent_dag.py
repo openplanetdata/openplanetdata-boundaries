@@ -28,6 +28,7 @@ from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.data.continents import CONTINENTS
 from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
 from workflows.operators.ogr2ogr import Ogr2OgrOperator
+from workflows.utils.dag_run import check_dag_run_failures
 
 CONTINENT_TAGS = ["boundaries", "continents", "openplanetdata"]
 
@@ -54,7 +55,7 @@ with DAG(
 ) as dag:
 
     @task.r2index_download(
-        task_display_name="Download Coastline",
+        task_display_name="Download Planet Coastline",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
@@ -117,9 +118,10 @@ with DAG(
         )
 
     @task(task_display_name="Cleanup", trigger_rule="all_done")
-    def cleanup() -> None:
-        """Clean up working directory."""
+    def cleanup(**context) -> None:
+        """Clean up working directory. Fails if any upstream task failed."""
         shutil.rmtree(WORK_DIR, ignore_errors=True)
+        check_dag_run_failures(context)
 
     # Task flow
     dirs = prepare_directories()
@@ -172,7 +174,7 @@ with DAG(
                 args=[
                     "-f", "GPKG", output_gpkg, dissolved_path,
                     "-dialect", "sqlite",
-                    "-sql", f"SELECT geom, continent, ROUND(ST_Area(geom) / 1000000.0, 2) AS area FROM dissolved",
+                    "-sql", f"SELECT geom, continent, ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved",
                     "-nln", slug,
                 ],
             )
