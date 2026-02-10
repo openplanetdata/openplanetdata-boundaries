@@ -35,7 +35,7 @@ from workflows.operators.ogr2ogr import Ogr2OgrOperator
 CONTINENT_TAGS = ["boundaries", "continents", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/continents"
-COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.parquet"
+COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.gpkg"
 COOKIE_CUTTER_PATH = f"{WORK_DIR}/continent-cookie-cutter.gpkg"
 
 
@@ -66,8 +66,8 @@ with DAG(
         """Download coastline data from R2."""
         return DownloadItem(
             destination=COASTLINE_PATH,
-            source_filename="planet-latest.coastline.parquet",
-            source_path="boundaries/coastline/geoparquet",
+            source_filename="planet-latest.coastline.gpkg",
+            source_path="boundaries/coastline/geopackage",
             source_version="v1",
         )
 
@@ -183,8 +183,7 @@ with DAG(
                 task_display_name="Clip Coastline",
                 args=[
                     "-f", "GPKG", clipped_path,
-                    COASTLINE_PATH, "planet_coastline",
-                    "-where", "feature_class = 'land'",
+                    COASTLINE_PATH, "land_polygons",
                     "-clipsrc", COOKIE_CUTTER_PATH,
                     "-clipsrclayer", "continent_cutter",
                     "-clipsrcwhere", f"continent = '{db_key}'",
