@@ -33,7 +33,6 @@ from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
 from openplanetdata.airflow.data.continents import CONTINENTS
 
-CONTINENT_COOKIE_CUTTER_REF = ("", "continent-cookie-cutter.gpkg", "1")
 CONTINENT_TAGS = ["boundary", "continent", "openstreetmap", "public"]
 
 # Reference to coastline asset (consumed by this DAG)
@@ -87,7 +86,7 @@ with DAG(
         return DownloadItem(
             destination=os.path.join(WORK_DIR, "continent-cookie-cutter.gpkg"),
             source_filename="continent-cookie-cutter.gpkg",
-            source_path="boundaries/continents/cookie-cutter",
+            source_path="boundaries/continents",
             source_version="",
         )
 
