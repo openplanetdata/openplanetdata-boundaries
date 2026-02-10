@@ -17,7 +17,6 @@ Per-country pipeline:
 from __future__ import annotations
 
 import os
-import shlex
 import shutil
 from datetime import timedelta
 
@@ -142,7 +141,6 @@ with DAG(
         slug = code
         name = country["name"]
         safe_name = name.replace("'", "''")
-        osm_query = f'a["ISO3166-1:alpha2"="{code}"]'
 
         tmp_dir = f"{WORK_DIR}/{slug}"
         raw_geojson = f"{tmp_dir}/raw.geojson"
@@ -158,7 +156,7 @@ with DAG(
                 task_id="extract_boundary",
                 task_display_name="Extract Boundary",
                 image=OPENPLANETDATA_IMAGE,
-                command=f"bash -c 'gol query {SHARED_PLANET_OSM_GOL_PATH} {shlex.quote(osm_query)} -f geojson > {raw_geojson}'",
+                command=f'bash -c "gol query {SHARED_PLANET_OSM_GOL_PATH} a[\\"ISO3166-1:alpha2\\"=\\"{code}\\"] -f geojson > {raw_geojson}"',
                 auto_remove="success",
                 force_pull=True,
                 mount_tmp_dir=False,
