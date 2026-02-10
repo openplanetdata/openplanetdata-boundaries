@@ -27,7 +27,7 @@ from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.data.continents import CONTINENTS
 from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
-from workflows.operators.ogr2ogr import Ogr2OgrOperator
+from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
 
 CONTINENT_TAGS = ["boundaries", "continents", "openplanetdata"]
 

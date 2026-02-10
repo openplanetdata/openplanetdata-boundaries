@@ -15,7 +15,7 @@ from airflow.sdk import DAG, Asset, task
 from docker.types import Mount
 from elaunira.airflow.providers.r2index.operators import DownloadItem, UploadItem
 from elaunira.r2index.storage import R2TransferConfig
-from workflows.operators.ogr2ogr import Ogr2OgrOperator
+from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
 from openplanetdata.airflow.defaults import (
     DOCKER_MOUNT,
     OPENPLANETDATA_IMAGE,
@@ -66,7 +66,7 @@ with DAG(
     def download_planet_pbf() -> DownloadItem:
         """Download planet PBF from R2."""
         return DownloadItem(
-            destination=SHARED_PLANET_OSM_PBF_PATH,
+            destination=SHARED_PLANET_OSM_PB1F_PATH,
             overwrite=False,
             source_filename="planet-latest.osm.pbf",
             source_path="osm/planet/pbf",

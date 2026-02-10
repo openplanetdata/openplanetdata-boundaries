@@ -29,7 +29,7 @@ from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.data.countries import COUNTRIES
 from openplanetdata.airflow.defaults import DOCKER_MOUNT, OPENPLANETDATA_IMAGE, OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID, SHARED_PLANET_OSM_GOL_PATH
-from workflows.operators.ogr2ogr import DOCKER_USER, Ogr2OgrOperator
+from openplanetdata.airflow.operators.ogr2ogr import DOCKER_USER, Ogr2OgrOperator
 
 COUNTRY_TAGS = ["boundaries", "countries", "openplanetdata"]
 
