@@ -66,7 +66,7 @@ with DAG(
             destination=PLANET_GOL_PATH,
             source_filename="planet-latest.osm.gol",
             source_path="osm/planet/gol",
-            source_version="v1",
+            source_version="v2",
         )
 
     @task.r2index_download(
