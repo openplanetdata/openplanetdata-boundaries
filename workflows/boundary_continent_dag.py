@@ -4,14 +4,12 @@ Continent Boundary DAG - Monthly continent boundary extraction.
 Schedule: Monthly 1st at 05:00 UTC
 Consumes: coastline GeoParquet from R2
 
-Required tools on worker: ogr2ogr, python3 with pyproj
-
 Continents: africa, antarctica, asia, europe, north-america, oceania, south-america
 
 Per-continent pipeline:
 1. Clip coastline by continent cookie-cutter (Docker ogr2ogr)
 2. Dissolve clipped polygons into single geometry (Docker ogr2ogr)
-3. Compute geodesic area and export final GeoPackage (worker ogr2ogr + pyproj)
+3. Export GeoPackage with geodesic area via ST_Area (Docker ogr2ogr)
 4. Export GeoJSON and GeoParquet in parallel (Docker ogr2ogr)
 5. Normalize GeoJSON to single Feature
 6. Upload all formats to R2
@@ -21,9 +19,8 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 from datetime import timedelta
-from airflow.exceptions import AirflowException
+
 from airflow.sdk import DAG, TaskGroup, task
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
@@ -51,7 +48,6 @@ with DAG(
     },
     description="Monthly continent boundary extraction from OSM coastline",
     doc_md=__doc__,
-    max_active_tasks=3,
     max_active_runs=1,
     schedule="0 5 1 * *",
     tags=["boundaries", "continents", "openplanetdata"],
@@ -90,37 +86,6 @@ with DAG(
         os.makedirs(f"{WORK_DIR}/output", exist_ok=True)
         for continent in CONTINENTS:
             os.makedirs(f"{WORK_DIR}/{continent['slug']}", exist_ok=True)
-
-    @task(task_display_name="Compute Area and Export GPKG")
-    def compute_area_and_export_gpkg(
-        slug: str,
-        db_key: str,
-        dissolved_path: str,
-        output_gpkg: str,
-    ) -> None:
-        """Export dissolved geometry to GeoJSON, compute geodesic area, then export GPKG with area."""
-        from workflows.utils.compute_area import compute_area_km2
-
-        dissolved_geojson = dissolved_path.replace(".gpkg", ".geojson")
-
-        subprocess.run(
-            ["ogr2ogr", "-f", "GeoJSON", dissolved_geojson, dissolved_path, "dissolved"],
-            check=True,
-            env={**os.environ, "OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
-        )
-
-        area_km2 = compute_area_km2(dissolved_geojson)
-        if area_km2 is None:
-            raise AirflowException(f"Failed to compute geodesic area for {slug}")
-
-        sql = f"SELECT geom, continent, CAST({area_km2} AS REAL) AS area FROM dissolved"
-        subprocess.run(
-            [
-                "ogr2ogr", "-f", "GPKG", output_gpkg, dissolved_path,
-                "-dialect", "sqlite", "-sql", sql, "-nln", slug,
-            ],
-            check=True,
-        )
 
     @task(task_display_name="Normalize GeoJSON")
     def normalize_geojson(geojson_path: str) -> None:
@@ -202,8 +167,15 @@ with DAG(
                 ],
             )
 
-            area_gpkg = compute_area_and_export_gpkg(
-                slug, db_key, dissolved_path, output_gpkg,
+            export_gpkg = Ogr2OgrOperator(
+                task_id="export_gpkg",
+                task_display_name="Export GeoPackage",
+                args=[
+                    "-f", "GPKG", output_gpkg, dissolved_path,
+                    "-dialect", "sqlite",
+                    "-sql", f"SELECT geom, continent, ROUND(ST_Area(geom) / 1000000.0, 2) AS area FROM dissolved",
+                    "-nln", slug,
+                ],
             )
 
             export_geojson_op = Ogr2OgrOperator(
@@ -234,8 +206,8 @@ with DAG(
             upload_parquet = upload_file.override(task_display_name="Upload GeoParquet")(slug, output_parquet, "parquet", "application/vnd.apache.parquet", "geoparquet")
 
             # Dependencies
-            [coastline_dl, cookie_dl] >> clip >> dissolve >> area_gpkg
-            area_gpkg >> [export_geojson_op, export_parquet_op, upload_gpkg]
+            [coastline_dl, cookie_dl] >> clip >> dissolve >> export_gpkg
+            export_gpkg >> [export_geojson_op, export_parquet_op, upload_gpkg]
             export_geojson_op >> normalize >> upload_geojson
             export_parquet_op >> upload_parquet
 
