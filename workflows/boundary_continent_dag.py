@@ -36,7 +36,7 @@ from workflows.operators.ogr2ogr import Ogr2OgrOperator
 CONTINENT_TAGS = ["boundaries", "continents", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/continents"
-COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.gpkg"
+COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.parquet"
 COOKIE_CUTTER_PATH = f"{WORK_DIR}/continent-cookie-cutter.gpkg"
 
 
@@ -231,9 +231,9 @@ with DAG(
                 ],
             )
 
-            upload_gpkg = upload_file(slug, output_gpkg, "gpkg", "application/geopackage+sqlite3", "geopackage")
-            upload_geojson = upload_file(slug, output_geojson, "geojson", "application/geo+json", "geojson")
-            upload_parquet = upload_file(slug, output_parquet, "parquet", "application/vnd.apache.parquet", "geoparquet")
+            upload_gpkg = upload_file.override(task_display_name="Upload GeoPackage")(slug, output_gpkg, "gpkg", "application/geopackage+sqlite3", "geopackage")
+            upload_geojson = upload_file.override(task_display_name="Upload GeoJSON")(slug, output_geojson, "geojson", "application/geo+json", "geojson")
+            upload_parquet = upload_file.override(task_display_name="Upload GeoParquet")(slug, output_parquet, "parquet", "application/vnd.apache.parquet", "geoparquet")
 
             # Dependencies
             [coastline_dl, cookie_dl] >> clip >> dissolve >> area_gpkg
