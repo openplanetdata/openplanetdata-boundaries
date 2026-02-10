@@ -136,7 +136,7 @@ with DAG(
 
     upload_tasks = []
 
-    for code in ["MC"]:  # TODO: restore to sorted(COUNTRIES.keys())
+    for code in sorted(COUNTRIES.keys()):
         country = COUNTRIES[code]
         slug = code
         name = country["name"]
