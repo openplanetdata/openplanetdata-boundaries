@@ -2,68 +2,57 @@
 Country Boundary DAG - Monthly country boundary extraction.
 
 Schedule: Monthly 1st at 04:00 UTC
-Source: .github/workflows/boundary-country.yaml + reusable-boundaries.yaml
-Consumes Asset: coastline_gpkg (optional - waits if available)
+Consumes: coastline GPKG and planet GOL from R2
 
-Required tools (provided by WORKER_IMAGE):
-- gol: OSM boundary queries
-- ogr2ogr: Format conversions, geometry operations, and area calculations
-
-Tasks:
-1. download_planet_gol / download_coastline - Download shared resources
-2. prepare_matrix - Build country matrix from countries data
-3. extract_and_upload.expand() - Dynamic task mapping using shared extraction logic
-4. cleanup - Remove downloaded files
+Per-country pipeline:
+1. Extract boundary from OSM via gol query
+2. Clip with coastline land polygons (Docker ogr2ogr)
+3. Dissolve clipped polygons into single geometry (Docker ogr2ogr)
+4. Export GeoPackage with geodesic area via ST_Area (Docker ogr2ogr)
+5. Export GeoJSON and GeoParquet in parallel (Docker ogr2ogr)
+6. Normalize GeoJSON to single Feature
+7. Upload all formats to R2
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
-from datetime import datetime, timedelta
+import subprocess
+from datetime import timedelta
 
-from airflow.sdk import DAG, Asset, task
+from airflow.sdk import DAG, TaskGroup, task
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
-from openplanetdata.airflow.defaults import EMAIL_ALERT_RECIPIENTS, R2_BUCKET, R2INDEX_CONNECTION_ID
 from openplanetdata.airflow.data.countries import COUNTRIES
+from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
+from workflows.operators.ogr2ogr import Ogr2OgrOperator
 
-COASTLINE_GPKG_REF = ("boundaries/coastline/geopackage", "planet-latest.coastline.gpkg", "v1")
-COUNTRY_TAGS = ["boundary", "country", "openstreetmap", "public"]
-MAX_PARALLEL_COUNTRIES = 5
-PLANET_GOL_REF = ("osm/planet/gol", "planet-latest.osm.gol", "v1")
+COUNTRY_TAGS = ["boundaries", "countries", "openplanetdata"]
 
-# Reference to coastline asset (consumed by this DAG)
-coastline_gpkg = Asset(
-    name="coastline_gpkg",
-    uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/latest/planet-latest.coastline.gpkg",
-)
-
-WORK_DIR = "/data/openplanetdata/country_boundaries"
+WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/countries"
+COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.gpkg"
+PLANET_GOL_PATH = f"{WORK_DIR}/planet-latest.osm.gol"
 
 
 with DAG(
     catchup=False,
-    dag_display_name="Boundary Country",
-    dag_id="boundary_country",
+    dag_display_name="OpenPlanetData Boundaries Countries",
+    dag_id="openplanetdata_boundaries_countries",
     default_args={
-        "depends_on_past": False,
-        "email": EMAIL_ALERT_RECIPIENTS,
-        "email_on_failure": True,
         "execution_timeout": timedelta(hours=1),
         "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
         "queue": "cortex",
-        "retries": 2,
-        "retry_delay": timedelta(minutes=10),
     },
     description="Monthly country boundary extraction from OSM",
     doc_md=__doc__,
-    max_active_tasks=MAX_PARALLEL_COUNTRIES,
+    max_active_runs=1,
+    max_active_tasks=5,
     schedule="0 4 1 * *",
-    start_date=datetime(2024, 1, 1),
-    tags=["boundary", "country", "osm", "monthly"],
+    tags=["boundaries", "countries", "openplanetdata"],
 ) as dag:
 
     @task.r2index_download(
@@ -73,203 +62,180 @@ with DAG(
     )
     def download_planet_gol() -> DownloadItem:
         """Download planet GOL from R2."""
-        gol_path, gol_filename, gol_version = PLANET_GOL_REF
         return DownloadItem(
-            destination=os.path.join(WORK_DIR, "planet-latest.osm.gol"),
-            source_filename=gol_filename,
-            source_path=gol_path,
-            source_version=gol_version,
+            destination=PLANET_GOL_PATH,
+            source_filename="planet-latest.osm.gol",
+            source_path="osm/planet/gol",
+            source_version="v1",
         )
 
     @task.r2index_download(
-        task_display_name="Download Coastline",
+        task_display_name="Download Planet Coastline",
         bucket=R2_BUCKET,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
     def download_coastline() -> DownloadItem:
         """Download coastline GPKG from R2."""
-        coast_path, coast_filename, coast_version = COASTLINE_GPKG_REF
         return DownloadItem(
-            destination=os.path.join(WORK_DIR, "planet-latest.coastline.gpkg"),
-            source_filename=coast_filename,
-            source_path=coast_path,
-            source_version=coast_version,
+            destination=COASTLINE_PATH,
+            source_filename="planet-latest.coastline.gpkg",
+            source_path="boundaries/coastline/geopackage",
+            source_version="v1",
         )
 
-    @task(task_display_name="Prepare Shared Resources")
-    def prepare_shared_resources(
-        gol_result: list[dict],
-        coastline_result: list[dict],
-    ) -> dict[str, str]:
-        """Combine download results into shared resources dict."""
-        return {
-            "work_dir": WORK_DIR,
-            "planet_gol": gol_result[0]["path"],
-            "coastline_gpkg": coastline_result[0]["path"],
-        }
+    @task(task_display_name="Prepare Directories")
+    def prepare_directories() -> None:
+        """Create working directories for all countries."""
+        for code in sorted(COUNTRIES.keys()):
+            os.makedirs(f"{WORK_DIR}/{code.lower()}", exist_ok=True)
 
-    @task(task_display_name="Prepare Matrix")
-    def prepare_matrix(country_codes: str | None = None) -> list[dict]:
-        """
-        Prepare the matrix of countries to process.
+    @task(task_display_name="Extract Boundary")
+    def extract_boundary(code: str, osm_query: str, output_path: str) -> None:
+        """Extract boundary from OSM using gol query."""
+        cmd = ["gol", "query", PLANET_GOL_PATH, osm_query, "-f", "geojson"]
+        with open(output_path, "w") as f:
+            result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"gol query failed for {code}: {result.stderr}")
+        with open(output_path) as f:
+            data = json.load(f)
+        if not data.get("features"):
+            raise RuntimeError(f"No features found for {code}")
 
-        This is equivalent to the 'prepare' job in boundary-country.yaml.
+    @task(task_display_name="Normalize GeoJSON")
+    def normalize_geojson(geojson_path: str) -> None:
+        """Normalize GeoJSON FeatureCollection to a single Feature."""
+        from workflows.utils.normalize_single_feature import normalize_geojson as normalize_to_single_feature
 
-        Args:
-            country_codes: Optional comma-separated list of country codes.
-                           If empty, processes all countries.
+        normalize_to_single_feature(geojson_path)
 
-        Returns:
-            List of country dictionaries with code, name, osm_query, has_coastline
-        """
-        countries = COUNTRIES
-
-        if country_codes:
-            codes = [c.strip().upper() for c in country_codes.split(",") if c.strip()]
-        else:
-            codes = sorted(countries.keys())
-
-        matrix = []
-        for code in codes:
-            if code in countries:
-                country = countries[code]
-                tag_name = (
-                    country["name"]
-                    .lower()
-                    .replace(" ", "-")
-                    .replace(".", "")
-                    .replace(",", "")
-                )
-                osm_query = f'a["ISO3166-1:alpha2"="{code}"]'
-                matrix.append(
-                    {
-                        "code": code,
-                        "name": country["name"],
-                        "osm_query": osm_query,
-                        "tag_name": tag_name,
-                        "has_coastline": country.get("has_coastline", True),
-                    }
-                )
-
-        return matrix
-
-    @task(task_display_name="Extract and Upload Boundary")
-    def extract_and_upload_boundary(
-        country: dict,
-        shared_resources: dict[str, str],
+    @task(task_display_name="Upload File")
+    def upload_file(
+        slug: str,
+        source: str,
+        ext: str,
+        media_type: str,
+        subfolder: str,
     ) -> dict:
-        """
-        Extract and upload boundary for a single country.
-
-        Requires: gol, ogr2ogr
-
-        Args:
-            country: Country dict with code, name, osm_query, has_coastline
-            shared_resources: Dict with paths to shared resources
-
-        Returns:
-            Dict with extraction result
-        """
-        # Import extraction logic (available in the container)
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent / "utils"))
-        from boundary_extraction import extract_country_boundary
-
-        work_dir = shared_resources["work_dir"]
-        planet_gol = shared_resources["planet_gol"]
-        coastline_gpkg_path = shared_resources["coastline_gpkg"]
-
-        # Create entity-specific output directory
-        output_dir = os.path.join(work_dir, "output", country["code"])
-
-        # Use the shared extraction logic
-        result = extract_country_boundary(
-            entity_code=country["code"],
-            entity_name=country["name"],
-            osm_query=country["osm_query"],
-            has_coastline=country["has_coastline"],
-            planet_gol=planet_gol,
-            coastline_gpkg=coastline_gpkg_path,
-            output_dir=output_dir,
+        """Upload a single format variant to R2."""
+        hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
+        return hook.upload(
+            bucket=R2_BUCKET,
+            category="boundary",
+            destination_filename=f"{slug}-latest.boundary.{ext}",
+            destination_path=f"boundaries/countries/{slug}/{subfolder}",
+            destination_version="v1",
+            entity=slug,
+            extension=ext,
+            media_type=media_type,
+            source=source,
+            tags=COUNTRY_TAGS + [slug, subfolder],
         )
 
-        extraction_result = {
-            "country": country,
-            "success": result.success,
-            "geojson_path": result.geojson_path,
-            "gpkg_path": result.gpkg_path,
-            "parquet_path": result.parquet_path,
-            "area_km2": result.area_km2,
-            "failure_reason": result.failure_reason,
-        }
+    @task(task_display_name="Done")
+    def done() -> None:
+        """No-op gate task to propagate upstream failures to DAG run state."""
 
-        # Upload if successful
-        if result.success:
-            tag_name = country["tag_name"]
-            tags = COUNTRY_TAGS + [tag_name]
-            extra = {"area_km2": result.area_km2} if result.area_km2 else None
+    @task(task_display_name="Cleanup", trigger_rule="all_done")
+    def cleanup() -> None:
+        """Clean up working directory."""
+        shutil.rmtree(WORK_DIR, ignore_errors=True)
 
-            hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
-            base_path = f"boundaries/countries/{country['code']}"
-            filename_base = f"{country['code']}-latest.boundary"
+    # Task flow
+    dirs = prepare_directories()
+    gol_dl = download_planet_gol()
+    coastline_dl = download_coastline()
+    dirs >> [gol_dl, coastline_dl]
 
-            upload_results = {}
-            formats = [
-                (result.geojson_path, "geojson", "application/geo+json", "geojson"),
-                (result.gpkg_path, "gpkg", "application/geopackage+sqlite3", "geopackage"),
-                (result.parquet_path, "parquet", "application/vnd.apache.parquet", "geoparquet"),
-            ]
+    upload_tasks = []
 
-            for local_path, ext, media_type, subfolder in formats:
-                if local_path and Path(local_path).exists():
-                    record = hook.upload(
-                        bucket=R2_BUCKET,
-                        category="boundary",
-                        destination_filename=f"{filename_base}.{ext}",
-                        destination_path=f"{base_path}/{subfolder}",
-                        destination_version="1",
-                        entity=country["code"],
-                        extension=ext,
-                        extra=extra,
-                        media_type=media_type,
-                        source=local_path,
-                        tags=tags + [subfolder],
-                    )
-                    upload_results[ext] = record["id"]
+    for code in sorted(COUNTRIES.keys()):
+        country = COUNTRIES[code]
+        slug = code.lower()
+        name = country["name"]
+        safe_name = name.replace("'", "''")
+        osm_query = f'a["ISO3166-1:alpha2"="{code}"]'
 
-            extraction_result["uploaded"] = True
-            extraction_result["upload_results"] = upload_results
+        tmp_dir = f"{WORK_DIR}/{slug}"
+        raw_geojson = f"{tmp_dir}/raw.geojson"
+        clipped_path = f"{tmp_dir}/clipped.gpkg"
+        dissolved_path = f"{tmp_dir}/dissolved.gpkg"
+        output_basename = f"{tmp_dir}/{slug}-latest.boundary"
+        output_gpkg = f"{output_basename}.gpkg"
+        output_geojson = f"{output_basename}.geojson"
+        output_parquet = f"{output_basename}.parquet"
 
-        return extraction_result
+        with TaskGroup(group_id=slug, group_display_name=f"Extract {name}"):
+            extract = extract_boundary(code, osm_query, raw_geojson)
 
-    @task(
-        task_display_name="Cleanup",
-        trigger_rule="all_done",
-    )
-    def cleanup(shared_resources: dict[str, str], results: list[dict]) -> None:
-        """Clean up temporary files."""
-        work_dir = shared_resources.get("work_dir")
-        if work_dir and os.path.exists(work_dir):
-            shutil.rmtree(work_dir, ignore_errors=True)
+            clip = Ogr2OgrOperator(
+                task_id="clip_coastline",
+                task_display_name="Clip Coastline",
+                args=[
+                    "-f", "GPKG", clipped_path,
+                    COASTLINE_PATH, "land_polygons",
+                    "-clipsrc", raw_geojson,
+                    "-nln", "clipped",
+                ],
+            )
 
-        # Log summary
-        successful = sum(1 for r in results if r.get("success"))
-        failed = len(results) - successful
-        print(f"Extraction complete: {successful} successful, {failed} failed")
-        for r in results:
-            if not r.get("success"):
-                print(f"  Failed: {r.get('country', {}).get('code')} - {r.get('failure_reason')}")
+            dissolve = Ogr2OgrOperator(
+                task_id="dissolve_polygons",
+                task_display_name="Dissolve Polygons",
+                args=[
+                    "-f", "GPKG", dissolved_path, clipped_path,
+                    "-dialect", "sqlite",
+                    "-sql", "SELECT ST_Union(geom) AS geom FROM clipped",
+                    "-nln", "dissolved",
+                ],
+            )
 
-    # Define task flow
-    gol_result = download_planet_gol()
-    coastline_result = download_coastline()
-    shared = prepare_shared_resources(gol_result, coastline_result)
-    countries = prepare_matrix()
+            export_gpkg = Ogr2OgrOperator(
+                task_id="export_gpkg",
+                task_display_name="Export GeoPackage",
+                args=[
+                    "-f", "GPKG", output_gpkg, dissolved_path,
+                    "-dialect", "sqlite",
+                    "-sql", f"""SELECT geom, '{code}' AS "ISO3166-1:alpha2", '{safe_name}' AS name, ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
+                    "-nln", slug,
+                ],
+            )
 
-    # Dynamic task mapping - similar to GitHub's matrix strategy
-    results = extract_and_upload_boundary.expand(
-        country=countries,
-        shared_resources=[shared],  # Broadcast shared resources
-    )
+            export_geojson_op = Ogr2OgrOperator(
+                task_id="export_geojson",
+                task_display_name="Export GeoJSON",
+                environment={"OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
+                args=[
+                    "-f", "GeoJSON", output_geojson,
+                    output_gpkg, slug,
+                    "-nln", slug,
+                ],
+            )
 
-    cleanup(shared, results)
+            normalize = normalize_geojson(output_geojson)
+
+            export_parquet_op = Ogr2OgrOperator(
+                task_id="export_parquet",
+                task_display_name="Export GeoParquet",
+                args=[
+                    "-f", "Parquet", output_parquet,
+                    output_gpkg, slug,
+                    "-nln", slug,
+                ],
+            )
+
+            upload_gpkg = upload_file.override(task_display_name="Upload GeoPackage")(slug, output_gpkg, "gpkg", "application/geopackage+sqlite3", "geopackage")
+            upload_geojson = upload_file.override(task_display_name="Upload GeoJSON")(slug, output_geojson, "geojson", "application/geo+json", "geojson")
+            upload_parquet = upload_file.override(task_display_name="Upload GeoParquet")(slug, output_parquet, "parquet", "application/vnd.apache.parquet", "geoparquet")
+
+            # Dependencies
+            gol_dl >> extract
+            [extract, coastline_dl] >> clip >> dissolve >> export_gpkg
+            export_gpkg >> [export_geojson_op, export_parquet_op, upload_gpkg]
+            export_geojson_op >> normalize >> upload_geojson
+            export_parquet_op >> upload_parquet
+
+            upload_tasks += [upload_gpkg, upload_geojson, upload_parquet]
+
+    upload_tasks >> done()
+    upload_tasks >> cleanup()
