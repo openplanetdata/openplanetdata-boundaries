@@ -184,7 +184,8 @@ with DAG(
                 task_display_name="Clip Coastline",
                 args=[
                     "-f", "GPKG", clipped_path,
-                    COASTLINE_PATH, "land_polygons",
+                    COASTLINE_PATH, "planet_coastline",
+                    "-where", "feature_class = 'land'",
                     "-clipsrc", COOKIE_CUTTER_PATH,
                     "-clipsrclayer", "continent_cutter",
                     "-clipsrcwhere", f"continent = '{db_key}'",
