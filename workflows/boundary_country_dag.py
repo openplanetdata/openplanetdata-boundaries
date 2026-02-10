@@ -7,8 +7,7 @@ Consumes Asset: coastline_gpkg (optional - waits if available)
 
 Required tools (provided by WORKER_IMAGE):
 - gol: OSM boundary queries
-- ogr2ogr: Format conversions and geometry operations
-- python3 with pyproj: Area calculations and metadata
+- ogr2ogr: Format conversions, geometry operations, and area calculations
 
 Tasks:
 1. download_planet_gol / download_coastline - Download shared resources
@@ -162,7 +161,7 @@ with DAG(
         """
         Extract and upload boundary for a single country.
 
-        Requires: gol, ogr2ogr, python3 with pyproj (from IMAGE_GOL)
+        Requires: gol, ogr2ogr
 
         Args:
             country: Country dict with code, name, osm_query, has_coastline

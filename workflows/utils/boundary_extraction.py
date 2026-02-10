@@ -11,19 +11,13 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-# Handle imports for both package and standalone execution
 try:
-    from workflows.utils.compute_area import compute_area_km2
     from workflows.utils.normalize_single_feature import normalize_geojson
 except ImportError:
-    # When run as standalone or when workflows package is not installed
-    from compute_area import compute_area_km2
     from normalize_single_feature import normalize_geojson
 
 logger = logging.getLogger(__name__)
@@ -51,6 +45,38 @@ def run_command(cmd: list[str], cwd: str | None = None) -> tuple[int, str, str]:
         text=True,
     )
     return result.returncode, result.stdout, result.stderr
+
+
+def compute_area_km2(geojson_path: str) -> float | None:
+    """Compute area in km² using ogr2ogr with EPSG:6933 equal-area projection."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_gpkg = os.path.join(tmpdir, "tmp.gpkg")
+        csv_path = os.path.join(tmpdir, "area.csv")
+
+        # Convert GeoJSON to GPKG with known layer name
+        rc, _, _ = run_command([
+            "ogr2ogr", "-f", "GPKG", tmp_gpkg, geojson_path,
+            "--config", "OGR_GEOJSON_MAX_OBJ_SIZE", "0",
+            "-nln", "boundary",
+        ])
+        if rc != 0:
+            return None
+
+        # Compute area via equal-area projection to CSV
+        rc, _, _ = run_command([
+            "ogr2ogr", "-f", "CSV", csv_path, tmp_gpkg,
+            "-dialect", "sqlite",
+            "-sql", "SELECT ROUND(ST_Area(ST_Transform(ST_Union(geom), 6933)) / 1000000.0, 2) AS area_km2 FROM boundary",
+        ])
+        if rc != 0:
+            return None
+
+        with open(csv_path) as f:
+            lines = f.read().strip().splitlines()
+            if len(lines) >= 2:
+                return float(lines[1])
+
+    return None
 
 
 def extract_boundary_with_gol(
