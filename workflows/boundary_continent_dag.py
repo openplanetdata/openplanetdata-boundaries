@@ -178,7 +178,7 @@ with DAG(
         output_geojson = f"{output_basename}.geojson"
         output_parquet = f"{output_basename}.parquet"
 
-        with TaskGroup(group_id=slug):
+        with TaskGroup(group_id=slug, group_display_name=f"Extract {continent['name']} Continent"):
             clip = Ogr2OgrOperator(
                 task_id="clip_coastline",
                 task_display_name="Clip Coastline",
