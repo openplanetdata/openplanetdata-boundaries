@@ -16,19 +16,20 @@ Per-country pipeline:
 
 from __future__ import annotations
 
-import json
 import os
+import shlex
 import shutil
-import subprocess
 from datetime import timedelta
 
+from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.sdk import DAG, TaskGroup, task
+from docker.types import Mount
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.data.countries import COUNTRIES
-from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
-from workflows.operators.ogr2ogr import Ogr2OgrOperator
+from openplanetdata.airflow.defaults import DOCKER_MOUNT, OPENPLANETDATA_IMAGE, OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
+from workflows.operators.ogr2ogr import DOCKER_USER, Ogr2OgrOperator
 
 COUNTRY_TAGS = ["boundaries", "countries", "openplanetdata"]
 
@@ -88,19 +89,6 @@ with DAG(
         """Create working directories for all countries."""
         for code in sorted(COUNTRIES.keys()):
             os.makedirs(f"{WORK_DIR}/{code}", exist_ok=True)
-
-    @task(task_display_name="Extract Boundary")
-    def extract_boundary(code: str, osm_query: str, output_path: str) -> None:
-        """Extract boundary from OSM using gol query."""
-        cmd = ["gol", "query", PLANET_GOL_PATH, osm_query, "-f", "geojson"]
-        with open(output_path, "w") as f:
-            result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"gol query failed for {code}: {result.stderr}")
-        with open(output_path) as f:
-            data = json.load(f)
-        if not data.get("features"):
-            raise RuntimeError(f"No features found for {code}")
 
     @task(task_display_name="Normalize GeoJSON")
     def normalize_geojson(geojson_path: str) -> None:
@@ -166,7 +154,17 @@ with DAG(
         output_parquet = f"{output_basename}.parquet"
 
         with TaskGroup(group_id=slug, group_display_name=f"Extract {name}"):
-            extract = extract_boundary(code, osm_query, raw_geojson)
+            extract = DockerOperator(
+                task_id="extract_boundary",
+                task_display_name="Extract Boundary",
+                image=OPENPLANETDATA_IMAGE,
+                command=f"bash -c 'gol query {PLANET_GOL_PATH} {shlex.quote(osm_query)} -f geojson > {raw_geojson}'",
+                auto_remove="success",
+                force_pull=True,
+                mount_tmp_dir=False,
+                mounts=[Mount(**DOCKER_MOUNT)],
+                user=DOCKER_USER,
+            )
 
             clip = Ogr2OgrOperator(
                 task_id="clip_coastline",
