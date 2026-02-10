@@ -50,7 +50,6 @@ with DAG(
     description="Monthly country boundary extraction from OSM",
     doc_md=__doc__,
     max_active_runs=1,
-    max_active_tasks=5,
     schedule="0 4 1 * *",
     tags=["boundaries", "countries", "openplanetdata"],
 ) as dag:
@@ -87,7 +86,7 @@ with DAG(
     def prepare_directories() -> None:
         """Create working directories for all countries."""
         for code in sorted(COUNTRIES.keys()):
-            os.makedirs(f"{WORK_DIR}/{code.lower()}", exist_ok=True)
+            os.makedirs(f"{WORK_DIR}/{code}", exist_ok=True)
 
     @task(task_display_name="Extract Boundary")
     def extract_boundary(code: str, osm_query: str, output_path: str) -> None:
@@ -151,7 +150,7 @@ with DAG(
 
     for code in sorted(COUNTRIES.keys()):
         country = COUNTRIES[code]
-        slug = code.lower()
+        slug = code
         name = country["name"]
         safe_name = name.replace("'", "''")
         osm_query = f'a["ISO3166-1:alpha2"="{code}"]'
