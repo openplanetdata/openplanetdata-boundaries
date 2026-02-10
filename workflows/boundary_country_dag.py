@@ -28,14 +28,13 @@ from docker.types import Mount
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.data.countries import COUNTRIES
-from openplanetdata.airflow.defaults import DOCKER_MOUNT, OPENPLANETDATA_IMAGE, OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
+from openplanetdata.airflow.defaults import DOCKER_MOUNT, OPENPLANETDATA_IMAGE, OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID, SHARED_PLANET_OSM_GOL_PATH
 from workflows.operators.ogr2ogr import DOCKER_USER, Ogr2OgrOperator
 
 COUNTRY_TAGS = ["boundaries", "countries", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/countries"
 COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.gpkg"
-PLANET_GOL_PATH = f"{WORK_DIR}/planet-latest.osm.gol"
 
 
 with DAG(
@@ -64,7 +63,8 @@ with DAG(
     def download_planet_gol() -> DownloadItem:
         """Download planet GOL from R2."""
         return DownloadItem(
-            destination=PLANET_GOL_PATH,
+            destination=SHARED_PLANET_OSM_GOL_PATH,
+            overwrite=False,
             source_filename="planet-latest.osm.gol",
             source_path="osm/planet/gol",
             source_version="v2",
@@ -158,7 +158,7 @@ with DAG(
                 task_id="extract_boundary",
                 task_display_name="Extract Boundary",
                 image=OPENPLANETDATA_IMAGE,
-                command=f"bash -c 'gol query {PLANET_GOL_PATH} {shlex.quote(osm_query)} -f geojson > {raw_geojson}'",
+                command=f"bash -c 'gol query {SHARED_PLANET_OSM_GOL_PATH} {shlex.quote(osm_query)} -f geojson > {raw_geojson}'",
                 auto_remove="success",
                 force_pull=True,
                 mount_tmp_dir=False,
