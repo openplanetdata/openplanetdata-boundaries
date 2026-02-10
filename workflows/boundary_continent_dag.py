@@ -24,8 +24,7 @@ import shutil
 import subprocess
 from datetime import timedelta
 from airflow.exceptions import AirflowException
-from airflow.sdk import DAG, task
-from airflow.utils.task_group import TaskGroup
+from airflow.sdk import DAG, TaskGroup, task
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
