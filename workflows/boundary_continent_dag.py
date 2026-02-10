@@ -32,8 +32,6 @@ from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.data.continents import CONTINENTS
 from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
 from workflows.operators.ogr2ogr import Ogr2OgrOperator
-from workflows.utils.compute_area import compute_area_km2
-from workflows.utils.normalize_single_feature import normalize_geojson as normalize_to_single_feature
 
 CONTINENT_TAGS = ["boundaries", "continents", "openplanetdata"]
 
@@ -102,6 +100,8 @@ with DAG(
         output_gpkg: str,
     ) -> None:
         """Export dissolved geometry to GeoJSON, compute geodesic area, then export GPKG with area."""
+        from workflows.utils.compute_area import compute_area_km2
+
         dissolved_geojson = dissolved_path.replace(".gpkg", ".geojson")
 
         subprocess.run(
@@ -126,6 +126,8 @@ with DAG(
     @task(task_display_name="Normalize GeoJSON")
     def normalize_geojson(geojson_path: str) -> None:
         """Normalize GeoJSON FeatureCollection to a single Feature."""
+        from workflows.utils.normalize_single_feature import normalize_geojson as normalize_to_single_feature
+
         normalize_to_single_feature(geojson_path)
 
     @task(task_display_name="Upload File")
