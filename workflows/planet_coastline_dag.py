@@ -65,7 +65,7 @@ with DAG(
     def download_planet_pbf() -> DownloadItem:
         """Download planet PBF from R2."""
         return DownloadItem(
-            destination=SHARED_PLANET_OSM_PB1F_PATH,
+            destination=SHARED_PLANET_OSM_PBF_PATH,
             overwrite=False,
             source_filename="planet-latest.osm.pbf",
             source_path="osm/planet/pbf",
