@@ -156,14 +156,20 @@ with DAG(
 
         return batches
 
-    @task(task_display_name="Process Region Batch")
+    @task.docker(
+        task_display_name="Process Region Batch",
+        image="ghcr.io/osgeo/gdal:ubuntu-full-latest",
+        auto_remove="success",
+        mount_tmp_dir=False,
+        mounts=[Mount(**DOCKER_MOUNT)],
+        user=DOCKER_USER,
+    )
     def process_region_batch(batch: dict[str, Any]) -> dict[str, Any]:
         """Process a batch of regions: dissolve, export, and upload."""
-        from airflow.sdk import get_current_context
+        import subprocess
 
         batch_id = batch["batch_id"]
         safe_codes = batch["codes"]  # Already sanitized codes
-        context = get_current_context()
         hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
 
         results = {
@@ -198,48 +204,41 @@ with DAG(
 
                 safe_region_code = region_code.replace("'", "''")
 
-                # Dissolve
-                Ogr2OgrOperator(
-                    task_id=f"dissolve_{safe_code}",
-                    args=[
-                        "-f", "GPKG", dissolved_gpkg, region_geojson,
-                        "-dialect", "sqlite",
-                        "-sql", "SELECT ST_Union(geometry) AS geom FROM raw",
-                        "-nln", "dissolved",
-                    ],
-                ).execute(context)
+                # Dissolve - use safe_code as layer name (filename without .geojson)
+                subprocess.run([
+                    "ogr2ogr",
+                    "-f", "GPKG", dissolved_gpkg, region_geojson,
+                    "-dialect", "sqlite",
+                    "-sql", f"SELECT ST_Union(geometry) AS geom FROM \"{safe_code}\"",
+                    "-nln", "dissolved",
+                ], check=True, capture_output=True, text=True)
 
                 # Export GPKG with attributes
-                Ogr2OgrOperator(
-                    task_id=f"export_gpkg_{safe_code}",
-                    args=[
-                        "-f", "GPKG", output_gpkg, dissolved_gpkg,
-                        "-dialect", "sqlite",
-                        "-sql", f"""SELECT geom, '{safe_region_code}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
-                        "-nln", safe_code,
-                    ],
-                ).execute(context)
+                subprocess.run([
+                    "ogr2ogr",
+                    "-f", "GPKG", output_gpkg, dissolved_gpkg,
+                    "-dialect", "sqlite",
+                    "-sql", f"""SELECT geom, '{safe_region_code}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
+                    "-nln", safe_code,
+                ], check=True, capture_output=True, text=True)
 
                 # Export GeoJSON
-                Ogr2OgrOperator(
-                    task_id=f"export_geojson_{safe_code}",
-                    environment={"OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
-                    args=[
-                        "-f", "GeoJSON", output_geojson,
-                        output_gpkg, safe_code,
-                        "-nln", safe_code,
-                    ],
-                ).execute(context)
+                env = os.environ.copy()
+                env["OGR_GEOJSON_MAX_OBJ_SIZE"] = "0"
+                subprocess.run([
+                    "ogr2ogr",
+                    "-f", "GeoJSON", output_geojson,
+                    output_gpkg, safe_code,
+                    "-nln", safe_code,
+                ], env=env, check=True, capture_output=True, text=True)
 
                 # Export GeoParquet
-                Ogr2OgrOperator(
-                    task_id=f"export_parquet_{safe_code}",
-                    args=[
-                        "-f", "Parquet", output_parquet,
-                        output_gpkg, safe_code,
-                        "-nln", safe_code,
-                    ],
-                ).execute(context)
+                subprocess.run([
+                    "ogr2ogr",
+                    "-f", "Parquet", output_parquet,
+                    output_gpkg, safe_code,
+                    "-nln", safe_code,
+                ], check=True, capture_output=True, text=True)
 
                 # Upload all formats
                 hook.upload(
