@@ -156,88 +156,103 @@ with DAG(
 
         return batches
 
-    @task(task_display_name="Process Region Batch")
-    def process_region_batch(batch: dict[str, Any]) -> dict[str, Any]:
-        """Process a batch of regions: dissolve, export, and upload."""
-        import subprocess
-
+    @task(task_display_name="Create Batch Processing Script")
+    def create_batch_script(batch: dict[str, Any]) -> str:
+        """Create a shell script to process a batch of regions using ogr2ogr."""
         batch_id = batch["batch_id"]
-        safe_codes = batch["codes"]  # Already sanitized codes
-        hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
+        safe_codes = batch["codes"]
 
-        # Docker command prefix for running ogr2ogr
-        docker_cmd = [
-            "docker", "run", "--rm",
-            "-v", f"{OPENPLANETDATA_WORK_DIR}:{OPENPLANETDATA_WORK_DIR}",
-            "ghcr.io/osgeo/gdal:ubuntu-full-latest",
-        ]
+        script_path = f"{WORK_DIR}/batch_{batch_id}.sh"
+
+        script_content = f"""#!/bin/bash
+set -e
+
+REGIONS_DIR="{WORK_DIR}/split"
+WORK_DIR="{WORK_DIR}"
+
+process_region() {{
+    local SAFE_CODE=$1
+    local REGION_CODE=$(echo $SAFE_CODE | sed 's/-/:/' )
+    local REGION_DIR="$WORK_DIR/$SAFE_CODE"
+
+    mkdir -p "$REGION_DIR"
+
+    local REGION_GEOJSON="$REGIONS_DIR/$SAFE_CODE.geojson"
+    local DISSOLVED_GPKG="$REGION_DIR/dissolved.gpkg"
+    local OUTPUT_GPKG="$REGION_DIR/$SAFE_CODE-latest.boundary.gpkg"
+    local OUTPUT_GEOJSON="$REGION_DIR/$SAFE_CODE-latest.boundary.geojson"
+    local OUTPUT_PARQUET="$REGION_DIR/$SAFE_CODE-latest.boundary.parquet"
+
+    # Dissolve
+    ogr2ogr -f GPKG "$DISSOLVED_GPKG" "$REGION_GEOJSON" \\
+        -dialect sqlite \\
+        -sql "SELECT ST_Union(geometry) AS geom FROM \\"$SAFE_CODE\\"" \\
+        -nln dissolved
+
+    # Export GPKG with attributes
+    ogr2ogr -f GPKG "$OUTPUT_GPKG" "$DISSOLVED_GPKG" \\
+        -dialect sqlite \\
+        -sql "SELECT geom, '$REGION_CODE' AS \\"ISO3166-2\\", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved" \\
+        -nln "$SAFE_CODE"
+
+    # Export GeoJSON
+    OGR_GEOJSON_MAX_OBJ_SIZE=0 ogr2ogr -f GeoJSON "$OUTPUT_GEOJSON" "$OUTPUT_GPKG" "$SAFE_CODE" -nln "$SAFE_CODE"
+
+    # Export GeoParquet
+    ogr2ogr -f Parquet "$OUTPUT_PARQUET" "$OUTPUT_GPKG" "$SAFE_CODE" -nln "$SAFE_CODE"
+
+    echo "Processed: $SAFE_CODE"
+}}
+
+"""
+        # Add region processing calls
+        for safe_code in safe_codes:
+            script_content += f'process_region "{safe_code}"\n'
+
+        with open(script_path, "w") as f:
+            f.write(script_content)
+
+        os.chmod(script_path, 0o755)
+        return script_path
+
+    def process_batch_docker_op(batch_id: int, script_path: str) -> DockerOperator:
+        """Create a DockerOperator to run the batch processing script."""
+        return DockerOperator(
+            task_id=f"process_batch_{batch_id}",
+            task_display_name=f"Process Batch {batch_id}",
+            image="ghcr.io/osgeo/gdal:ubuntu-full-latest",
+            command=["bash", script_path],
+            auto_remove="success",
+            mount_tmp_dir=False,
+            mounts=[Mount(**DOCKER_MOUNT)],
+            user=DOCKER_USER,
+        )
+
+    @task(task_display_name="Upload Region Batch")
+    def upload_region_batch(batch: dict[str, Any]) -> dict[str, Any]:
+        """Upload all regions in a batch to R2."""
+        batch_id = batch["batch_id"]
+        safe_codes = batch["codes"]
+        hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
 
         results = {
             "batch_id": batch_id,
-            "processed": 0,
+            "uploaded": 0,
             "failed": 0,
-            "regions": []
         }
-
-        regions_dir = f"{WORK_DIR}/split"
 
         for safe_code in safe_codes:
             try:
-                # Use pre-split region file
-                region_geojson = f"{regions_dir}/{safe_code}.geojson"
-
-                if not os.path.exists(region_geojson):
-                    results["failed"] += 1
-                    continue
-
-                # Restore original region code (reverse sanitization)
-                region_code = safe_code.replace("-", ":", 1)  # Only first dash
-
+                region_code = safe_code.replace("-", ":", 1)
                 region_dir = f"{WORK_DIR}/{safe_code}"
-                os.makedirs(region_dir, exist_ok=True)
 
-                # Process region
-                dissolved_gpkg = f"{region_dir}/dissolved.gpkg"
                 output_gpkg = f"{region_dir}/{safe_code}-latest.boundary.gpkg"
                 output_geojson = f"{region_dir}/{safe_code}-latest.boundary.geojson"
                 output_parquet = f"{region_dir}/{safe_code}-latest.boundary.parquet"
 
-                safe_region_code = region_code.replace("'", "''")
-
-                # Dissolve - use safe_code as layer name (filename without .geojson)
-                subprocess.run(docker_cmd + [
-                    "ogr2ogr",
-                    "-f", "GPKG", dissolved_gpkg, region_geojson,
-                    "-dialect", "sqlite",
-                    "-sql", f"SELECT ST_Union(geometry) AS geom FROM \"{safe_code}\"",
-                    "-nln", "dissolved",
-                ], check=True, capture_output=True, text=True)
-
-                # Export GPKG with attributes
-                subprocess.run(docker_cmd + [
-                    "ogr2ogr",
-                    "-f", "GPKG", output_gpkg, dissolved_gpkg,
-                    "-dialect", "sqlite",
-                    "-sql", f"""SELECT geom, '{safe_region_code}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
-                    "-nln", safe_code,
-                ], check=True, capture_output=True, text=True)
-
-                # Export GeoJSON
-                subprocess.run(docker_cmd + [
-                    "-e", "OGR_GEOJSON_MAX_OBJ_SIZE=0",
-                    "ogr2ogr",
-                    "-f", "GeoJSON", output_geojson,
-                    output_gpkg, safe_code,
-                    "-nln", safe_code,
-                ], check=True, capture_output=True, text=True)
-
-                # Export GeoParquet
-                subprocess.run(docker_cmd + [
-                    "ogr2ogr",
-                    "-f", "Parquet", output_parquet,
-                    output_gpkg, safe_code,
-                    "-nln", safe_code,
-                ], check=True, capture_output=True, text=True)
+                if not os.path.exists(output_gpkg):
+                    results["failed"] += 1
+                    continue
 
                 # Upload all formats
                 hook.upload(
@@ -279,13 +294,11 @@ with DAG(
                     tags=REGION_TAGS + [safe_code, "geoparquet"],
                 )
 
-                results["processed"] += 1
-                results["regions"].append(region_code)
+                results["uploaded"] += 1
 
             except Exception as e:
                 results["failed"] += 1
-                # Log error but continue processing other regions
-                print(f"Failed to process region {region_code}: {e}")
+                print(f"Failed to upload region {safe_code}: {e}")
 
         return results
 
@@ -310,9 +323,30 @@ with DAG(
     # Create batches of regions for parallel processing
     batches = create_region_batches(split_info)
 
-    # Process each batch in parallel (each batch handles ~50 regions)
-    batch_results = process_region_batch.expand(batch=batches)
+    # Create processing scripts for each batch
+    scripts = create_batch_script.expand(batch=batches)
+
+    # Process each batch using DockerOperator (similar to extract task)
+    # Note: We can't use .expand() on DockerOperator directly, so we create them dynamically
+    # For now, use a task to orchestrate
+    @task(task_display_name="Process All Batches")
+    def process_all_batches(batch_scripts: list[tuple[dict, str]]) -> list[dict]:
+        """Run all batch processing scripts."""
+        results = []
+        for batch, script_path in batch_scripts:
+            batch_id = batch["batch_id"]
+            op = process_batch_docker_op(batch_id, script_path)
+            op.execute({})
+            results.append({"batch_id": batch_id, "status": "completed"})
+        return results
+
+    # Process batches
+    batch_info = process_all_batches(list(zip(batches, scripts)))
+
+    # Upload results for each batch
+    upload_results = upload_region_batch.expand(batch=batches)
+    batch_info >> upload_results
 
     # Final tasks
-    batch_results >> done()
-    batch_results >> cleanup()
+    upload_results >> done()
+    upload_results >> cleanup()
