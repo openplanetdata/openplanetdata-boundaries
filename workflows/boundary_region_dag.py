@@ -95,9 +95,9 @@ with DAG(
         user=DOCKER_USER,
     )
 
-    @task(task_display_name="Parse Region Codes")
-    def parse_region_codes() -> list[str]:
-        """Extract unique ISO3166-2 codes from the raw GeoJSON."""
+    @task(task_display_name="Create Region Batches")
+    def create_region_batches(batch_size: int = 50) -> list[dict[str, Any]]:
+        """Extract unique ISO3166-2 codes and create batches for parallel processing."""
         with open(RAW_GEOJSON, "r", encoding="utf-8") as fh:
             data = json.load(fh)
 
@@ -108,161 +108,167 @@ with DAG(
                 if iso_code:
                     codes.add(iso_code)
 
-        return sorted(codes)
+        sorted_codes = sorted(codes)
 
-    @task(task_display_name="Prepare Region Directory")
-    def prepare_region_directory(region_code: str) -> str:
-        """Create directory for a specific region."""
-        # Sanitize region code for filesystem (replace : with -)
-        safe_code = region_code.replace(":", "-")
-        region_dir = f"{WORK_DIR}/{safe_code}"
-        os.makedirs(region_dir, exist_ok=True)
-        return safe_code
+        # Create batches
+        batches = []
+        for i in range(0, len(sorted_codes), batch_size):
+            batch_codes = sorted_codes[i:i + batch_size]
+            batches.append({
+                "batch_id": i // batch_size,
+                "codes": batch_codes,
+                "start_idx": i,
+                "end_idx": min(i + batch_size, len(sorted_codes))
+            })
 
-    @task(task_display_name="Extract Region")
-    def extract_region(region_code: str, safe_code: str) -> str:
-        """Extract a single region boundary from the raw GeoJSON."""
-        region_geojson = f"{WORK_DIR}/{safe_code}/raw.geojson"
+        return batches
 
-        # Read raw geojson and filter for this region
-        with open(RAW_GEOJSON, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-
-        features = []
-        if data.get("type") == "FeatureCollection":
-            for feature in data.get("features", []):
-                if feature.get("properties", {}).get("ISO3166-2") == region_code:
-                    features.append(feature)
-
-        filtered_data = {
-            "type": "FeatureCollection",
-            "features": features
-        }
-
-        with open(region_geojson, "w", encoding="utf-8") as fh:
-            json.dump(filtered_data, fh)
-
-        return region_geojson
-
-    @task(task_display_name="Process Region")
-    def process_region(region_code: str, safe_code: str, region_geojson: str) -> dict[str, str]:
-        """Process a single region: dissolve and export to all formats."""
+    @task(task_display_name="Process Region Batch")
+    def process_region_batch(batch: dict[str, Any]) -> dict[str, Any]:
+        """Process a batch of regions: extract, dissolve, export, and upload."""
         from airflow.sdk import get_current_context
 
-        dissolved_gpkg = f"{WORK_DIR}/{safe_code}/dissolved.gpkg"
-        output_gpkg = f"{WORK_DIR}/{safe_code}/{safe_code}-latest.boundary.gpkg"
-        output_geojson = f"{WORK_DIR}/{safe_code}/{safe_code}-latest.boundary.geojson"
-        output_parquet = f"{WORK_DIR}/{safe_code}/{safe_code}-latest.boundary.parquet"
-
-        safe_region_code = region_code.replace("'", "''")
-
+        batch_id = batch["batch_id"]
+        region_codes = batch["codes"]
         context = get_current_context()
-
-        # Dissolve using ogr2ogr in Docker
-        dissolve_op = Ogr2OgrOperator(
-            task_id=f"dissolve_{safe_code}",
-            args=[
-                "-f", "GPKG", dissolved_gpkg, region_geojson,
-                "-dialect", "sqlite",
-                "-sql", "SELECT ST_Union(geometry) AS geom FROM raw",
-                "-nln", "dissolved",
-            ],
-        )
-        dissolve_op.execute(context)
-
-        # Export GPKG with attributes
-        export_gpkg_op = Ogr2OgrOperator(
-            task_id=f"export_gpkg_{safe_code}",
-            args=[
-                "-f", "GPKG", output_gpkg, dissolved_gpkg,
-                "-dialect", "sqlite",
-                "-sql", f"""SELECT geom, '{safe_region_code}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
-                "-nln", safe_code,
-            ],
-        )
-        export_gpkg_op.execute(context)
-
-        # Export GeoJSON
-        export_geojson_op = Ogr2OgrOperator(
-            task_id=f"export_geojson_{safe_code}",
-            environment={"OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
-            args=[
-                "-f", "GeoJSON", output_geojson,
-                output_gpkg, safe_code,
-                "-nln", safe_code,
-            ],
-        )
-        export_geojson_op.execute(context)
-
-        # Export GeoParquet
-        export_parquet_op = Ogr2OgrOperator(
-            task_id=f"export_parquet_{safe_code}",
-            args=[
-                "-f", "Parquet", output_parquet,
-                output_gpkg, safe_code,
-                "-nln", safe_code,
-            ],
-        )
-        export_parquet_op.execute(context)
-
-        return {
-            "gpkg": output_gpkg,
-            "geojson": output_geojson,
-            "parquet": output_parquet,
-        }
-
-    @task(task_display_name="Upload Region Files")
-    def upload_region_files(
-        region_code: str,
-        safe_code: str,
-        outputs: dict[str, str],
-    ) -> dict[str, dict]:
-        """Upload all format variants for a region to R2."""
         hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
 
-        results = {}
+        results = {
+            "batch_id": batch_id,
+            "processed": 0,
+            "failed": 0,
+            "regions": []
+        }
 
-        # Upload GPKG
-        results["gpkg"] = hook.upload(
-            bucket=R2_BUCKET,
-            category="boundary",
-            destination_filename=f"{safe_code}-latest.boundary.gpkg",
-            destination_path=f"boundaries/regions/{safe_code}/geopackage",
-            destination_version="v1",
-            entity=safe_code,
-            extension="gpkg",
-            media_type="application/geopackage+sqlite3",
-            source=outputs["gpkg"],
-            tags=REGION_TAGS + [safe_code, "geopackage"],
-        )
+        # Load raw GeoJSON once for the batch
+        with open(RAW_GEOJSON, "r", encoding="utf-8") as fh:
+            raw_data = json.load(fh)
 
-        # Upload GeoJSON
-        results["geojson"] = hook.upload(
-            bucket=R2_BUCKET,
-            category="boundary",
-            destination_filename=f"{safe_code}-latest.boundary.geojson",
-            destination_path=f"boundaries/regions/{safe_code}/geojson",
-            destination_version="v1",
-            entity=safe_code,
-            extension="geojson",
-            media_type="application/geo+json",
-            source=outputs["geojson"],
-            tags=REGION_TAGS + [safe_code, "geojson"],
-        )
+        for region_code in region_codes:
+            try:
+                # Sanitize region code for filesystem
+                safe_code = region_code.replace(":", "-")
+                region_dir = f"{WORK_DIR}/{safe_code}"
+                os.makedirs(region_dir, exist_ok=True)
 
-        # Upload GeoParquet
-        results["parquet"] = hook.upload(
-            bucket=R2_BUCKET,
-            category="boundary",
-            destination_filename=f"{safe_code}-latest.boundary.parquet",
-            destination_path=f"boundaries/regions/{safe_code}/geoparquet",
-            destination_version="v1",
-            entity=safe_code,
-            extension="parquet",
-            media_type="application/vnd.apache.parquet",
-            source=outputs["parquet"],
-            tags=REGION_TAGS + [safe_code, "geoparquet"],
-        )
+                # Extract region features
+                region_geojson = f"{region_dir}/raw.geojson"
+                features = []
+                if raw_data.get("type") == "FeatureCollection":
+                    for feature in raw_data.get("features", []):
+                        if feature.get("properties", {}).get("ISO3166-2") == region_code:
+                            features.append(feature)
+
+                if not features:
+                    results["failed"] += 1
+                    continue
+
+                filtered_data = {
+                    "type": "FeatureCollection",
+                    "features": features
+                }
+
+                with open(region_geojson, "w", encoding="utf-8") as fh:
+                    json.dump(filtered_data, fh)
+
+                # Process region
+                dissolved_gpkg = f"{region_dir}/dissolved.gpkg"
+                output_gpkg = f"{region_dir}/{safe_code}-latest.boundary.gpkg"
+                output_geojson = f"{region_dir}/{safe_code}-latest.boundary.geojson"
+                output_parquet = f"{region_dir}/{safe_code}-latest.boundary.parquet"
+
+                safe_region_code = region_code.replace("'", "''")
+
+                # Dissolve
+                Ogr2OgrOperator(
+                    task_id=f"dissolve_{safe_code}",
+                    args=[
+                        "-f", "GPKG", dissolved_gpkg, region_geojson,
+                        "-dialect", "sqlite",
+                        "-sql", "SELECT ST_Union(geometry) AS geom FROM raw",
+                        "-nln", "dissolved",
+                    ],
+                ).execute(context)
+
+                # Export GPKG with attributes
+                Ogr2OgrOperator(
+                    task_id=f"export_gpkg_{safe_code}",
+                    args=[
+                        "-f", "GPKG", output_gpkg, dissolved_gpkg,
+                        "-dialect", "sqlite",
+                        "-sql", f"""SELECT geom, '{safe_region_code}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
+                        "-nln", safe_code,
+                    ],
+                ).execute(context)
+
+                # Export GeoJSON
+                Ogr2OgrOperator(
+                    task_id=f"export_geojson_{safe_code}",
+                    environment={"OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
+                    args=[
+                        "-f", "GeoJSON", output_geojson,
+                        output_gpkg, safe_code,
+                        "-nln", safe_code,
+                    ],
+                ).execute(context)
+
+                # Export GeoParquet
+                Ogr2OgrOperator(
+                    task_id=f"export_parquet_{safe_code}",
+                    args=[
+                        "-f", "Parquet", output_parquet,
+                        output_gpkg, safe_code,
+                        "-nln", safe_code,
+                    ],
+                ).execute(context)
+
+                # Upload all formats
+                hook.upload(
+                    bucket=R2_BUCKET,
+                    category="boundary",
+                    destination_filename=f"{safe_code}-latest.boundary.gpkg",
+                    destination_path=f"boundaries/regions/{safe_code}/geopackage",
+                    destination_version="v1",
+                    entity=safe_code,
+                    extension="gpkg",
+                    media_type="application/geopackage+sqlite3",
+                    source=output_gpkg,
+                    tags=REGION_TAGS + [safe_code, "geopackage"],
+                )
+
+                hook.upload(
+                    bucket=R2_BUCKET,
+                    category="boundary",
+                    destination_filename=f"{safe_code}-latest.boundary.geojson",
+                    destination_path=f"boundaries/regions/{safe_code}/geojson",
+                    destination_version="v1",
+                    entity=safe_code,
+                    extension="geojson",
+                    media_type="application/geo+json",
+                    source=output_geojson,
+                    tags=REGION_TAGS + [safe_code, "geojson"],
+                )
+
+                hook.upload(
+                    bucket=R2_BUCKET,
+                    category="boundary",
+                    destination_filename=f"{safe_code}-latest.boundary.parquet",
+                    destination_path=f"boundaries/regions/{safe_code}/geoparquet",
+                    destination_version="v1",
+                    entity=safe_code,
+                    extension="parquet",
+                    media_type="application/vnd.apache.parquet",
+                    source=output_parquet,
+                    tags=REGION_TAGS + [safe_code, "geoparquet"],
+                )
+
+                results["processed"] += 1
+                results["regions"].append(region_code)
+
+            except Exception as e:
+                results["failed"] += 1
+                # Log error but continue processing other regions
+                print(f"Failed to process region {region_code}: {e}")
 
         return results
 
@@ -280,33 +286,13 @@ with DAG(
     gol_dl = download_planet_gol()
     dirs >> gol_dl >> extract_all
 
-    # Parse region codes from extracted data
-    region_codes = parse_region_codes()
-    extract_all >> region_codes
+    # Create batches of regions for parallel processing
+    batches = create_region_batches()
+    extract_all >> batches
 
-    # Dynamic task mapping - process each region in parallel
-    safe_codes = prepare_region_directory.expand(region_code=region_codes)
-
-    # Extract individual region data
-    region_geojsons = extract_region.expand(
-        region_code=region_codes,
-        safe_code=safe_codes
-    )
-
-    # Process each region (dissolve + export all formats)
-    region_outputs = process_region.expand(
-        region_code=region_codes,
-        safe_code=safe_codes,
-        region_geojson=region_geojsons
-    )
-
-    # Upload all formats for each region
-    uploads = upload_region_files.expand(
-        region_code=region_codes,
-        safe_code=safe_codes,
-        outputs=region_outputs
-    )
+    # Process each batch in parallel (each batch handles ~50 regions)
+    batch_results = process_region_batch.expand(batch=batches)
 
     # Final tasks
-    uploads >> done()
-    uploads >> cleanup()
+    batch_results >> done()
+    batch_results >> cleanup()
