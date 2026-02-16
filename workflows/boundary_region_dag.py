@@ -156,12 +156,15 @@ with DAG(
 
         return batches
 
-    @task(task_display_name="Create Batch Processing Script")
-    def create_batch_script(batch: dict[str, Any]) -> str:
-        """Create a shell script to process a batch of regions using ogr2ogr."""
+    @task(task_display_name="Process Region Batch")
+    def process_region_batch(batch: dict[str, Any]) -> dict[str, Any]:
+        """Process a batch of regions using ogr2ogr in Docker."""
+        import subprocess
+
         batch_id = batch["batch_id"]
         safe_codes = batch["codes"]
 
+        # Create bash script for this batch
         script_path = f"{WORK_DIR}/batch_{batch_id}.sh"
 
         script_content = f"""#!/bin/bash
@@ -213,20 +216,20 @@ process_region() {{
             f.write(script_content)
 
         os.chmod(script_path, 0o755)
-        return script_path
 
-    def process_batch_docker_op(batch_id: int, script_path: str) -> DockerOperator:
-        """Create a DockerOperator to run the batch processing script."""
-        return DockerOperator(
-            task_id=f"process_batch_{batch_id}",
-            task_display_name=f"Process Batch {batch_id}",
-            image="ghcr.io/osgeo/gdal:ubuntu-full-latest",
-            command=["bash", script_path],
-            auto_remove="success",
-            mount_tmp_dir=False,
-            mounts=[Mount(**DOCKER_MOUNT)],
-            user=DOCKER_USER,
-        )
+        # Run script in Docker container with GDAL
+        result = subprocess.run([
+            "docker", "run", "--rm",
+            "-v", f"{OPENPLANETDATA_WORK_DIR}:{OPENPLANETDATA_WORK_DIR}",
+            "ghcr.io/osgeo/gdal:ubuntu-full-latest",
+            "bash", script_path
+        ], capture_output=True, text=True, check=True)
+
+        return {
+            "batch_id": batch_id,
+            "processed": len(safe_codes),
+            "status": "completed"
+        }
 
     @task(task_display_name="Upload Region Batch")
     def upload_region_batch(batch: dict[str, Any]) -> dict[str, Any]:
@@ -323,29 +326,12 @@ process_region() {{
     # Create batches of regions for parallel processing
     batches = create_region_batches(split_info)
 
-    # Create processing scripts for each batch
-    scripts = create_batch_script.expand(batch=batches)
-
-    # Process each batch using DockerOperator (similar to extract task)
-    # Note: We can't use .expand() on DockerOperator directly, so we create them dynamically
-    # For now, use a task to orchestrate
-    @task(task_display_name="Process All Batches")
-    def process_all_batches(batch_scripts: list[tuple[dict, str]]) -> list[dict]:
-        """Run all batch processing scripts."""
-        results = []
-        for batch, script_path in batch_scripts:
-            batch_id = batch["batch_id"]
-            op = process_batch_docker_op(batch_id, script_path)
-            op.execute({})
-            results.append({"batch_id": batch_id, "status": "completed"})
-        return results
-
-    # Process batches
-    batch_info = process_all_batches(list(zip(batches, scripts)))
+    # Process each batch in parallel (creates script and runs in Docker)
+    process_results = process_region_batch.expand(batch=batches)
 
     # Upload results for each batch
     upload_results = upload_region_batch.expand(batch=batches)
-    batch_info >> upload_results
+    process_results >> upload_results
 
     # Final tasks
     upload_results >> done()
