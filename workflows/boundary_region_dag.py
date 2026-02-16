@@ -156,14 +156,7 @@ with DAG(
 
         return batches
 
-    @task.docker(
-        task_display_name="Process Region Batch",
-        image="ghcr.io/osgeo/gdal:ubuntu-full-latest",
-        auto_remove="success",
-        mount_tmp_dir=False,
-        mounts=[Mount(**DOCKER_MOUNT)],
-        user=DOCKER_USER,
-    )
+    @task(task_display_name="Process Region Batch")
     def process_region_batch(batch: dict[str, Any]) -> dict[str, Any]:
         """Process a batch of regions: dissolve, export, and upload."""
         import subprocess
@@ -171,6 +164,13 @@ with DAG(
         batch_id = batch["batch_id"]
         safe_codes = batch["codes"]  # Already sanitized codes
         hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
+
+        # Docker command prefix for running ogr2ogr
+        docker_cmd = [
+            "docker", "run", "--rm",
+            "-v", f"{OPENPLANETDATA_WORK_DIR}:{OPENPLANETDATA_WORK_DIR}",
+            "ghcr.io/osgeo/gdal:ubuntu-full-latest",
+        ]
 
         results = {
             "batch_id": batch_id,
@@ -205,7 +205,7 @@ with DAG(
                 safe_region_code = region_code.replace("'", "''")
 
                 # Dissolve - use safe_code as layer name (filename without .geojson)
-                subprocess.run([
+                subprocess.run(docker_cmd + [
                     "ogr2ogr",
                     "-f", "GPKG", dissolved_gpkg, region_geojson,
                     "-dialect", "sqlite",
@@ -214,7 +214,7 @@ with DAG(
                 ], check=True, capture_output=True, text=True)
 
                 # Export GPKG with attributes
-                subprocess.run([
+                subprocess.run(docker_cmd + [
                     "ogr2ogr",
                     "-f", "GPKG", output_gpkg, dissolved_gpkg,
                     "-dialect", "sqlite",
@@ -223,17 +223,16 @@ with DAG(
                 ], check=True, capture_output=True, text=True)
 
                 # Export GeoJSON
-                env = os.environ.copy()
-                env["OGR_GEOJSON_MAX_OBJ_SIZE"] = "0"
-                subprocess.run([
+                subprocess.run(docker_cmd + [
+                    "-e", "OGR_GEOJSON_MAX_OBJ_SIZE=0",
                     "ogr2ogr",
                     "-f", "GeoJSON", output_geojson,
                     output_gpkg, safe_code,
                     "-nln", safe_code,
-                ], env=env, check=True, capture_output=True, text=True)
+                ], check=True, capture_output=True, text=True)
 
                 # Export GeoParquet
-                subprocess.run([
+                subprocess.run(docker_cmd + [
                     "ogr2ogr",
                     "-f", "Parquet", output_parquet,
                     output_gpkg, safe_code,
