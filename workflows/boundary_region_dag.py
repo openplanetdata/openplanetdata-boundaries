@@ -95,41 +95,74 @@ with DAG(
         user=DOCKER_USER,
     )
 
-    @task(task_display_name="Create Region Batches")
-    def create_region_batches(batch_size: int = 50) -> list[dict[str, Any]]:
-        """Extract unique ISO3166-2 codes and create batches for parallel processing."""
+    @task(task_display_name="Split Regions into Files")
+    def split_regions_into_files() -> dict[str, int]:
+        """Split raw GeoJSON into individual region files to avoid memory issues."""
+        regions_dir = f"{WORK_DIR}/split"
+        os.makedirs(regions_dir, exist_ok=True)
+
+        # Process raw GeoJSON and write individual region files
+        region_files = {}
+
         with open(RAW_GEOJSON, "r", encoding="utf-8") as fh:
             data = json.load(fh)
 
-        codes = set()
         if data.get("type") == "FeatureCollection":
             for feature in data.get("features", []):
                 iso_code = feature.get("properties", {}).get("ISO3166-2")
-                if iso_code:
-                    codes.add(iso_code)
+                if not iso_code:
+                    continue
 
-        sorted_codes = sorted(codes)
+                safe_code = iso_code.replace(":", "-")
+                region_file = f"{regions_dir}/{safe_code}.geojson"
+
+                # Append features to region file
+                if safe_code not in region_files:
+                    region_files[safe_code] = []
+
+                region_files[safe_code].append(feature)
+
+        # Write each region's features to a file
+        for safe_code, features in region_files.items():
+            region_file = f"{regions_dir}/{safe_code}.geojson"
+            region_data = {
+                "type": "FeatureCollection",
+                "features": features
+            }
+            with open(region_file, "w", encoding="utf-8") as fh:
+                json.dump(region_data, fh)
+
+        return {"total_regions": len(region_files)}
+
+    @task(task_display_name="Create Region Batches")
+    def create_region_batches(split_info: dict[str, int], batch_size: int = 50) -> list[dict[str, Any]]:
+        """Create batches of region codes for parallel processing."""
+        regions_dir = f"{WORK_DIR}/split"
+
+        # Get all region files
+        region_codes = []
+        for filename in sorted(os.listdir(regions_dir)):
+            if filename.endswith(".geojson"):
+                region_codes.append(filename[:-8])  # Remove .geojson extension
 
         # Create batches
         batches = []
-        for i in range(0, len(sorted_codes), batch_size):
-            batch_codes = sorted_codes[i:i + batch_size]
+        for i in range(0, len(region_codes), batch_size):
+            batch_codes = region_codes[i:i + batch_size]
             batches.append({
                 "batch_id": i // batch_size,
                 "codes": batch_codes,
-                "start_idx": i,
-                "end_idx": min(i + batch_size, len(sorted_codes))
             })
 
         return batches
 
     @task(task_display_name="Process Region Batch")
     def process_region_batch(batch: dict[str, Any]) -> dict[str, Any]:
-        """Process a batch of regions: extract, dissolve, export, and upload."""
+        """Process a batch of regions: dissolve, export, and upload."""
         from airflow.sdk import get_current_context
 
         batch_id = batch["batch_id"]
-        region_codes = batch["codes"]
+        safe_codes = batch["codes"]  # Already sanitized codes
         context = get_current_context()
         hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
 
@@ -140,36 +173,22 @@ with DAG(
             "regions": []
         }
 
-        # Load raw GeoJSON once for the batch
-        with open(RAW_GEOJSON, "r", encoding="utf-8") as fh:
-            raw_data = json.load(fh)
+        regions_dir = f"{WORK_DIR}/split"
 
-        for region_code in region_codes:
+        for safe_code in safe_codes:
             try:
-                # Sanitize region code for filesystem
-                safe_code = region_code.replace(":", "-")
-                region_dir = f"{WORK_DIR}/{safe_code}"
-                os.makedirs(region_dir, exist_ok=True)
+                # Use pre-split region file
+                region_geojson = f"{regions_dir}/{safe_code}.geojson"
 
-                # Extract region features
-                region_geojson = f"{region_dir}/raw.geojson"
-                features = []
-                if raw_data.get("type") == "FeatureCollection":
-                    for feature in raw_data.get("features", []):
-                        if feature.get("properties", {}).get("ISO3166-2") == region_code:
-                            features.append(feature)
-
-                if not features:
+                if not os.path.exists(region_geojson):
                     results["failed"] += 1
                     continue
 
-                filtered_data = {
-                    "type": "FeatureCollection",
-                    "features": features
-                }
+                # Restore original region code (reverse sanitization)
+                region_code = safe_code.replace("-", ":", 1)  # Only first dash
 
-                with open(region_geojson, "w", encoding="utf-8") as fh:
-                    json.dump(filtered_data, fh)
+                region_dir = f"{WORK_DIR}/{safe_code}"
+                os.makedirs(region_dir, exist_ok=True)
 
                 # Process region
                 dissolved_gpkg = f"{region_dir}/dissolved.gpkg"
@@ -286,9 +305,12 @@ with DAG(
     gol_dl = download_planet_gol()
     dirs >> gol_dl >> extract_all
 
+    # Split regions into individual files to avoid loading large file in each batch
+    split_info = split_regions_into_files()
+    extract_all >> split_info
+
     # Create batches of regions for parallel processing
-    batches = create_region_batches()
-    extract_all >> batches
+    batches = create_region_batches(split_info)
 
     # Process each batch in parallel (each batch handles ~50 regions)
     batch_results = process_region_batch.expand(batch=batches)
