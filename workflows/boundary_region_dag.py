@@ -42,7 +42,7 @@ from openplanetdata.airflow.operators.ogr2ogr import DOCKER_USER, Ogr2OgrOperato
 REGION_TAGS = ["boundaries", "regions", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/regions"
-RAW_GEOJSON = f"{WORK_DIR}/raw.geojson"
+ALL_REGIONS_GEOJSON = f"{WORK_DIR}/all_regions.geojson"
 COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.gpkg"
 
 
@@ -102,7 +102,7 @@ with DAG(
         task_id="extract_all_regions",
         task_display_name="Extract All Regions",
         image=OPENPLANETDATA_IMAGE,
-        command=["bash", "-c", f'gol query {SHARED_PLANET_OSM_GOL_PATH} \'a["ISO3166-2"]\' -f geojson > {RAW_GEOJSON}'],
+        command=["bash", "-c", f'gol query {SHARED_PLANET_OSM_GOL_PATH} \'a["ISO3166-2"]\' -f geojson > {ALL_REGIONS_GEOJSON}'],
         auto_remove="success",
         force_pull=True,
         mount_tmp_dir=False,
@@ -118,7 +118,7 @@ with DAG(
 
         region_features: dict[str, list] = {}
 
-        with open(RAW_GEOJSON, "r", encoding="utf-8") as fh:
+        with open(ALL_REGIONS_GEOJSON, "r", encoding="utf-8") as fh:
             data = json.load(fh)
 
         if data.get("type") == "FeatureCollection":
