@@ -150,6 +150,7 @@ with DAG(
                     "-f", "GPKG", f"{WORK_DIR}/{code}/clipped.gpkg",
                     COASTLINE_PATH, "land_polygons",
                     "-clipsrc", f"{WORK_DIR}/split/{code}.geojson",
+                    "-makevalid",
                     "-nln", "clipped",
                 ],
             }
@@ -241,7 +242,21 @@ with DAG(
             )
         return {"code": code, "status": "uploaded"}
 
-    @task(task_display_name="Done")
+    @task(task_display_name="Report Failures", trigger_rule="all_done")
+    def report_failures(codes: list[str]) -> None:
+        """Report regions that failed to produce output files."""
+        failed = [
+            code for code in codes
+            if not os.path.exists(f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg")
+        ]
+        if failed:
+            print(f"Processing failed for {len(failed)}/{len(codes)} region(s):")
+            for code in failed:
+                print(f"  {code}")
+        else:
+            print(f"All {len(codes)} regions processed successfully.")
+
+    @task(task_display_name="Done", trigger_rule="all_done")
     def done() -> None:
         """No-op gate task to propagate upstream failures to DAG run state."""
 
@@ -292,5 +307,6 @@ with DAG(
     # Dependencies
     [region_dirs, coastline_dl] >> clip >> dissolve >> export_gpkg >> [export_geojson, export_parquet] >> upload_results
 
-    upload_results >> done()
+    report = report_failures(codes)
+    upload_results >> report >> done()
     upload_results >> cleanup()
