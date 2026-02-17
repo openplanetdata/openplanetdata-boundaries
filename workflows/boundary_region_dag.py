@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import shutil
 from datetime import timedelta
 
@@ -38,31 +37,13 @@ from openplanetdata.airflow.defaults import (
     R2INDEX_CONNECTION_ID,
     SHARED_PLANET_OSM_GOL_PATH,
 )
-from openplanetdata.airflow.operators.ogr2ogr import DOCKER_USER
+from openplanetdata.airflow.operators.ogr2ogr import DOCKER_USER, Ogr2OgrOperator
 
 REGION_TAGS = ["boundaries", "regions", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/regions"
 OPENSTREETMAP_REGIONS_GEOJSON = f"{WORK_DIR}/openstreetmap-regions.geojson"
 COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.gpkg"
-GDAL_IMAGE = "ghcr.io/osgeo/gdal:ubuntu-full-latest"
-
-
-def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
-    """Run ogr2ogr in the GDAL Docker container, mirroring Ogr2OgrOperator."""
-    import docker
-    client = docker.from_env()
-    cmd = shlex.join(["ogr2ogr", *args])
-    client.containers.run(
-        image=GDAL_IMAGE,
-        command=f"bash -c {shlex.quote(cmd)}",
-        environment=env or {},
-        mounts=[Mount(**DOCKER_MOUNT)],
-        remove=True,
-        stderr=True,
-        stdout=True,
-        user=DOCKER_USER,
-    )
 
 
 with DAG(
@@ -163,93 +144,117 @@ with DAG(
 
     @task_group(group_display_name="Process Region")
     def process_region(code: str) -> None:
-        """Per-region independent pipeline: clip → dissolve → export."""
+        """Per-region independent pipeline: clip → dissolve → export → upload."""
 
-        @task(task_display_name="Clip Coastline")
-        def clip_coastline(code: str) -> str:
-            _run_ogr2ogr([
+        clip = Ogr2OgrOperator(
+            task_id="clip_coastline",
+            task_display_name="Clip Coastline",
+            args=[
                 "-f", "GPKG", f"{WORK_DIR}/{code}/clipped.gpkg",
                 COASTLINE_PATH, "land_polygons",
                 "-clipsrc", f"{WORK_DIR}/split/{code}.geojson",
                 "-makevalid",
                 "-nln", "clipped",
-            ])
-            return code
+            ],
+        )
 
-        @task(task_display_name="Dissolve")
-        def dissolve(code: str) -> str:
-            _run_ogr2ogr([
+        dissolve = Ogr2OgrOperator(
+            task_id="dissolve",
+            task_display_name="Dissolve",
+            args=[
                 "-f", "GPKG", f"{WORK_DIR}/{code}/dissolved.gpkg",
                 f"{WORK_DIR}/{code}/clipped.gpkg",
                 "-dialect", "sqlite",
                 "-sql", "SELECT ST_Union(geom) AS geom FROM clipped",
                 "-nln", "dissolved",
-            ])
-            return code
+            ],
+        )
 
-        @task(task_display_name="Export GeoPackage")
-        def export_gpkg(code: str) -> str:
-            iso_code = code.replace("-", ":", 1)
-            _run_ogr2ogr([
+        export_gpkg = Ogr2OgrOperator(
+            task_id="export_gpkg",
+            task_display_name="Export GeoPackage",
+            args=[
                 "-f", "GPKG", f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg",
                 f"{WORK_DIR}/{code}/dissolved.gpkg",
                 "-dialect", "sqlite",
-                "-sql", f"""SELECT geom, '{iso_code}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
-                "-nln", code,
-            ])
-            return code
+                "-sql", """SELECT geom, '{{ code | replace("-", ":") }}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
+                "-nln", f"{code}",
+            ],
+        )
 
-        @task(task_display_name="Export GeoJSON")
-        def export_geojson(code: str) -> str:
-            _run_ogr2ogr(
-                ["-f", "GeoJSON", f"{WORK_DIR}/{code}/{code}-latest.boundary.geojson",
-                 f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg", code,
-                 "-nln", code],
-                env={"OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
-            )
-            return code
+        export_geojson = Ogr2OgrOperator(
+            task_id="export_geojson",
+            task_display_name="Export GeoJSON",
+            environment={"OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
+            args=[
+                "-f", "GeoJSON", f"{WORK_DIR}/{code}/{code}-latest.boundary.geojson",
+                f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg", f"{code}",
+                "-nln", f"{code}",
+            ],
+        )
 
-        @task(task_display_name="Export GeoParquet")
-        def export_parquet(code: str) -> str:
-            _run_ogr2ogr([
+        export_parquet = Ogr2OgrOperator(
+            task_id="export_parquet",
+            task_display_name="Export GeoParquet",
+            args=[
                 "-f", "Parquet", f"{WORK_DIR}/{code}/{code}-latest.boundary.parquet",
-                f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg", code,
-                "-nln", code,
-            ])
-            return code
-
-        def _upload(code: str, ext: str, subfolder: str, media_type: str) -> None:
-            R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID).upload(
-                bucket=R2_BUCKET,
-                category="boundary",
-                destination_filename=f"{code}-latest.boundary.{ext}",
-                destination_path=f"boundaries/regions/{code}/{subfolder}",
-                destination_version="v1",
-                entity=code.replace("-", ":", 1),
-                extension=ext,
-                media_type=media_type,
-                source=f"{WORK_DIR}/{code}/{code}-latest.boundary.{ext}",
-                tags=REGION_TAGS + [code, subfolder],
-            )
+                f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg", f"{code}",
+                "-nln", f"{code}",
+            ],
+        )
 
         @task(task_display_name="Upload GeoPackage")
         def upload_gpkg(code: str) -> None:
-            _upload(code, "gpkg", "geopackage", "application/geopackage+sqlite3")
+            R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID).upload(
+                bucket=R2_BUCKET,
+                category="boundary",
+                destination_filename=f"{code}-latest.boundary.gpkg",
+                destination_path=f"boundaries/regions/{code}/geopackage",
+                destination_version="v1",
+                entity=code.replace("-", ":", 1),
+                extension="gpkg",
+                media_type="application/geopackage+sqlite3",
+                source=f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg",
+                tags=REGION_TAGS + [code, "geopackage"],
+            )
 
         @task(task_display_name="Upload GeoJSON")
         def upload_geojson(code: str) -> None:
-            _upload(code, "geojson", "geojson", "application/geo+json")
+            R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID).upload(
+                bucket=R2_BUCKET,
+                category="boundary",
+                destination_filename=f"{code}-latest.boundary.geojson",
+                destination_path=f"boundaries/regions/{code}/geojson",
+                destination_version="v1",
+                entity=code.replace("-", ":", 1),
+                extension="geojson",
+                media_type="application/geo+json",
+                source=f"{WORK_DIR}/{code}/{code}-latest.boundary.geojson",
+                tags=REGION_TAGS + [code, "geojson"],
+            )
 
         @task(task_display_name="Upload GeoParquet")
         def upload_parquet(code: str) -> None:
-            _upload(code, "parquet", "geoparquet", "application/vnd.apache.parquet")
+            R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID).upload(
+                bucket=R2_BUCKET,
+                category="boundary",
+                destination_filename=f"{code}-latest.boundary.parquet",
+                destination_path=f"boundaries/regions/{code}/geoparquet",
+                destination_version="v1",
+                entity=code.replace("-", ":", 1),
+                extension="parquet",
+                media_type="application/vnd.apache.parquet",
+                source=f"{WORK_DIR}/{code}/{code}-latest.boundary.parquet",
+                tags=REGION_TAGS + [code, "geoparquet"],
+            )
 
-        clipped = clip_coastline(code)
-        dissolved = dissolve(clipped)
-        gpkg = export_gpkg(dissolved)
-        upload_gpkg(gpkg)
-        upload_geojson(export_geojson(gpkg))
-        upload_parquet(export_parquet(gpkg))
+        gpkg_upload = upload_gpkg(code)
+        geojson_upload = upload_geojson(code)
+        parquet_upload = upload_parquet(code)
+
+        clip >> dissolve >> export_gpkg >> [export_geojson, export_parquet, gpkg_upload]
+        export_geojson >> geojson_upload
+        export_parquet >> parquet_upload
 
     @task(task_display_name="Report Failures", trigger_rule="all_done")
     def report_failures(codes: list[str]) -> None:
