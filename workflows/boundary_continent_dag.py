@@ -32,10 +32,6 @@ COASTLINE_GPKG_ASSET = Asset(
     name="openplanetdata-boundaries-coastline-gpkg",
     uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
 )
-CONTINENTS_ASSET = Asset(
-    name="openplanetdata-boundaries-continents",
-    uri=f"s3://{R2_BUCKET}/boundaries/continents/completed",
-)
 from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
 
 CONTINENT_TAGS = ["boundaries", "continents", "openplanetdata"]
@@ -138,7 +134,7 @@ with DAG(
             tags=CONTINENT_TAGS + [slug, subfolder],
         )
 
-    @task(task_display_name="Done", outlets=[CONTINENTS_ASSET])
+    @task(task_display_name="Done")
     def done() -> None:
         """No-op gate task to propagate upstream failures to DAG run state."""
 

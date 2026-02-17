@@ -29,13 +29,9 @@ from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, 
 from openplanetdata.airflow.operators.gol import GolOperator
 from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
 
-CONTINENTS_ASSET = Asset(
-    name="openplanetdata-boundaries-continents",
-    uri=f"s3://{R2_BUCKET}/boundaries/continents/completed",
-)
-COUNTRIES_ASSET = Asset(
-    name="openplanetdata-boundaries-countries",
-    uri=f"s3://{R2_BUCKET}/boundaries/countries/completed",
+COASTLINE_GPKG_ASSET = Asset(
+    name="openplanetdata-boundaries-coastline-gpkg",
+    uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
 )
 
 COUNTRY_TAGS = ["boundaries", "countries", "openplanetdata"]
@@ -57,7 +53,7 @@ with DAG(
     doc_md=__doc__,
     max_active_runs=1,
     max_active_tasks=32,
-    schedule=CONTINENTS_ASSET,
+    schedule=COASTLINE_GPKG_ASSET,
     tags=["boundaries", "countries", "openplanetdata"],
 ) as dag:
 
@@ -140,7 +136,7 @@ with DAG(
             tags=COUNTRY_TAGS + [slug, subfolder],
         )
 
-    @task(task_display_name="Done", outlets=[COUNTRIES_ASSET])
+    @task(task_display_name="Done")
     def done() -> None:
         """No-op gate task to propagate upstream failures to DAG run state."""
 
