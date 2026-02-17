@@ -18,26 +18,49 @@ Per-continent pipeline:
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor
 
 from airflow.sdk import DAG, Asset, TaskGroup, task
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.data.continents import CONTINENTS
-from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID, SHARED_PLANET_COASTLINE_GPKG_PATH
+from openplanetdata.airflow.defaults import DOCKER_MOUNT, OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID, SHARED_PLANET_COASTLINE_GPKG_PATH
 
 COASTLINE_GPKG_ASSET = Asset(
     name="openplanetdata-boundaries-coastline-gpkg",
     uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
 )
+from openplanetdata.airflow.operators.gol import DOCKER_USER
 from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
 
 CONTINENT_TAGS = ["boundaries", "continents", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/continents"
 COOKIE_CUTTER_PATH = f"{WORK_DIR}/continent-cookie-cutter.gpkg"
+GDAL_IMAGE = "ghcr.io/osgeo/gdal:ubuntu-full-latest"
+PLANET_BASENAME = f"{WORK_DIR}/planet-latest.continents"
+
+
+def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
+    """Run ogr2ogr inside the GDAL Docker container."""
+    import docker
+    from docker.types import Mount
+
+    cmd = shlex.join(["ogr2ogr", *args])
+    docker.from_env().containers.run(
+        image=GDAL_IMAGE,
+        command=f"bash -c {shlex.quote(cmd)}",
+        environment=env or {},
+        mounts=[Mount(**DOCKER_MOUNT)],
+        remove=True,
+        stderr=True,
+        stdout=True,
+        user=DOCKER_USER,
+    )
 
 
 with DAG(
@@ -143,6 +166,57 @@ with DAG(
         """Clean up working directory."""
         shutil.rmtree(WORK_DIR, ignore_errors=True)
 
+    @task(task_display_name="Merge & Export Planet Continents")
+    def merge_and_export_planet_continents() -> None:
+        """Merge all continent GPKGs into a single planet file and export formats."""
+        planet_gpkg = f"{PLANET_BASENAME}.gpkg"
+        planet_geojson = f"{PLANET_BASENAME}.geojson"
+        planet_parquet = f"{PLANET_BASENAME}.parquet"
+
+        # Merge continent GPKGs sequentially
+        first = True
+        for continent in CONTINENTS:
+            slug = continent["slug"]
+            src_gpkg = f"{WORK_DIR}/{slug}/{slug}-latest.boundary.gpkg"
+            args = ["-f", "GPKG"]
+            if not first:
+                args.append("-append")
+            args += [planet_gpkg, src_gpkg, slug, "-nln", "continents"]
+            _run_ogr2ogr(args)
+            first = False
+
+        # Export GeoJSON and GeoParquet in parallel
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_geojson = ex.submit(_run_ogr2ogr, [
+                "-f", "GeoJSON", planet_geojson,
+                planet_gpkg, "continents",
+                "-nln", "continents",
+            ], {"OGR_GEOJSON_MAX_OBJ_SIZE": "0"})
+            f_parquet = ex.submit(_run_ogr2ogr, [
+                "-f", "Parquet", planet_parquet,
+                planet_gpkg, "continents",
+                "-nln", "continents",
+            ])
+            f_geojson.result()
+            f_parquet.result()
+
+    @task(task_display_name="Upload Planet File")
+    def upload_planet_file(source: str, ext: str, media_type: str, subfolder: str) -> dict:
+        """Upload a planet continents aggregate file to R2."""
+        hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
+        return hook.upload(
+            bucket=R2_BUCKET,
+            category="boundary",
+            destination_filename=f"planet-latest.continents.{ext}",
+            destination_path=f"boundaries/continents/planet/{subfolder}",
+            destination_version="v1",
+            entity="planet",
+            extension=ext,
+            media_type=media_type,
+            source=source,
+            tags=CONTINENT_TAGS + ["planet", subfolder],
+        )
+
     # Task flow
     dirs = prepare_directories()
     coastline_dl = download_coastline()
@@ -234,5 +308,19 @@ with DAG(
 
             upload_tasks += [upload_gpkg, upload_geojson, upload_parquet]
 
-    upload_tasks >> done()
-    upload_tasks >> cleanup()
+    with TaskGroup(group_id="planet_continents", group_display_name="Aggregate Planet Continents"):
+        merge = merge_and_export_planet_continents()
+        pu_gpkg = upload_planet_file.override(task_display_name="Upload Planet GeoPackage")(
+            f"{PLANET_BASENAME}.gpkg", "gpkg", "application/geopackage+sqlite3", "geopackage",
+        )
+        pu_geojson = upload_planet_file.override(task_display_name="Upload Planet GeoJSON")(
+            f"{PLANET_BASENAME}.geojson", "geojson", "application/geo+json", "geojson",
+        )
+        pu_parquet = upload_planet_file.override(task_display_name="Upload Planet GeoParquet")(
+            f"{PLANET_BASENAME}.parquet", "parquet", "application/vnd.apache.parquet", "geoparquet",
+        )
+        merge >> [pu_gpkg, pu_geojson, pu_parquet]
+
+    upload_tasks >> merge
+    [pu_gpkg, pu_geojson, pu_parquet] >> done()
+    [pu_gpkg, pu_geojson, pu_parquet] >> cleanup()
