@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 from airflow.exceptions import AirflowException
-from airflow.sdk import DAG, task
+from airflow.sdk import DAG, Asset, task
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
@@ -40,6 +40,11 @@ from openplanetdata.airflow.defaults import (
     SHARED_PLANET_OSM_GOL_PATH,
 )
 from openplanetdata.airflow.operators.gol import DOCKER_USER, GolOperator
+
+COUNTRIES_ASSET = Asset(
+    name="openplanetdata-boundaries-countries",
+    uri=f"s3://{R2_BUCKET}/boundaries/countries/completed",
+)
 
 REGION_TAGS = ["boundaries", "regions", "openplanetdata"]
 
@@ -192,7 +197,7 @@ with DAG(
     doc_md=__doc__,
     max_active_runs=1,
     max_active_tasks=24,  # 24 batches × BATCH_WORKERS=2 → 48 concurrent regions (memory-safe)
-    schedule="0 8 * * 1",
+    schedule=COUNTRIES_ASSET,
     tags=["boundaries", "regions", "openplanetdata"],
 ) as dag:
 

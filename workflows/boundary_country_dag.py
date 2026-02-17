@@ -20,7 +20,7 @@ import os
 import shutil
 from datetime import timedelta
 
-from airflow.sdk import DAG, TaskGroup, task
+from airflow.sdk import DAG, Asset, TaskGroup, task
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
@@ -28,6 +28,15 @@ from openplanetdata.airflow.data.countries import COUNTRIES
 from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID, SHARED_PLANET_COASTLINE_GPKG_PATH, SHARED_PLANET_OSM_GOL_PATH
 from openplanetdata.airflow.operators.gol import GolOperator
 from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
+
+CONTINENTS_ASSET = Asset(
+    name="openplanetdata-boundaries-continents",
+    uri=f"s3://{R2_BUCKET}/boundaries/continents/completed",
+)
+COUNTRIES_ASSET = Asset(
+    name="openplanetdata-boundaries-countries",
+    uri=f"s3://{R2_BUCKET}/boundaries/countries/completed",
+)
 
 COUNTRY_TAGS = ["boundaries", "countries", "openplanetdata"]
 
@@ -48,7 +57,7 @@ with DAG(
     doc_md=__doc__,
     max_active_runs=1,
     max_active_tasks=32,
-    schedule="0 7 * * 1",
+    schedule=CONTINENTS_ASSET,
     tags=["boundaries", "countries", "openplanetdata"],
 ) as dag:
 
@@ -131,7 +140,7 @@ with DAG(
             tags=COUNTRY_TAGS + [slug, subfolder],
         )
 
-    @task(task_display_name="Done")
+    @task(task_display_name="Done", outlets=[COUNTRIES_ASSET])
     def done() -> None:
         """No-op gate task to propagate upstream failures to DAG run state."""
 

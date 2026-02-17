@@ -21,12 +21,21 @@ import os
 import shutil
 from datetime import timedelta
 
-from airflow.sdk import DAG, TaskGroup, task
+from airflow.sdk import DAG, Asset, TaskGroup, task
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.data.continents import CONTINENTS
 from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID, SHARED_PLANET_COASTLINE_GPKG_PATH
+
+COASTLINE_GPKG_ASSET = Asset(
+    name="openplanetdata-boundaries-coastline-gpkg",
+    uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
+)
+CONTINENTS_ASSET = Asset(
+    name="openplanetdata-boundaries-continents",
+    uri=f"s3://{R2_BUCKET}/boundaries/continents/completed",
+)
 from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
 
 CONTINENT_TAGS = ["boundaries", "continents", "openplanetdata"]
@@ -48,7 +57,7 @@ with DAG(
     description="Monthly continent boundary extraction from OSM coastline",
     doc_md=__doc__,
     max_active_runs=1,
-    schedule="0 6 * * 1",
+    schedule=COASTLINE_GPKG_ASSET,
     tags=["boundaries", "continents", "openplanetdata"],
 ) as dag:
 
@@ -129,7 +138,7 @@ with DAG(
             tags=CONTINENT_TAGS + [slug, subfolder],
         )
 
-    @task(task_display_name="Done")
+    @task(task_display_name="Done", outlets=[CONTINENTS_ASSET])
     def done() -> None:
         """No-op gate task to propagate upstream failures to DAG run state."""
 
