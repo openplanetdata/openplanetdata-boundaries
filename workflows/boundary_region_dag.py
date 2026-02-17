@@ -95,8 +95,8 @@ with DAG(
         """Create working directory."""
         os.makedirs(WORK_DIR, exist_ok=True)
 
-    extract_all = GolOperator(
-        task_id="extract_all_regions",
+    extract_region_boundaries_from_osm = GolOperator(
+        task_id="extract_all_regions_from_osm",
         task_display_name="Extract All ISO3166-2 Boundaries from OSM",
         args=["query", SHARED_PLANET_OSM_GOL_PATH, 'a["ISO3166-2"]', "-f", "geojson"],
         output_file=OPENSTREETMAP_REGIONS_GEOJSON,
@@ -104,10 +104,7 @@ with DAG(
 
     @task(task_display_name="Split Regions into Files")
     def split_regions_into_files() -> list[str]:
-        """Split raw GeoJSON into individual region files, returns sorted list of safe_codes."""
-        regions_dir = f"{WORK_DIR}/split"
-        os.makedirs(regions_dir, exist_ok=True)
-
+        """Split raw GeoJSON into individual region files, returns sorted list of osm_region_codes."""
         region_features: dict[str, list] = {}
 
         with open(OPENSTREETMAP_REGIONS_GEOJSON, "r", encoding="utf-8") as fh:
@@ -122,7 +119,7 @@ with DAG(
                 region_features.setdefault(safe_code, []).append(feature)
 
         for safe_code, features in region_features.items():
-            region_file = f"{WORK_DIR}/split/{safe_code}.geojson"
+            region_file = f"{WORK_DIR}/{safe_code}.geojson"
             with open(region_file, "w", encoding="utf-8") as fh:
                 json.dump({"type": "FeatureCollection", "features": features}, fh)
 
@@ -144,7 +141,7 @@ with DAG(
             args=[
                 "-f", "GPKG", f"{WORK_DIR}/{code}/clipped.gpkg",
                 SHARED_PLANET_COASTLINE_GPKG_PATH, "land_polygons",
-                "-clipsrc", f"{WORK_DIR}/split/{code}.geojson",
+                "-clipsrc", f"{WORK_DIR}/{code}.geojson",
                 "-makevalid",
                 "-nln", "clipped",
             ],
@@ -276,10 +273,10 @@ with DAG(
     gol_dl = download_planet_gol()
     coastline_dl = download_coastline()
     dirs >> [gol_dl, coastline_dl]
-    gol_dl >> extract_all
+    gol_dl >> extract_region_boundaries_from_osm
 
     codes = split_regions_into_files()
-    extract_all >> codes
+    extract_region_boundaries_from_osm >> codes
 
     region_dirs = prepare_region_dirs(codes)
 
