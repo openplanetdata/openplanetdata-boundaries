@@ -7,12 +7,12 @@ Consumes: planet GOL from R2
 Pipeline (per region):
 1. Extract all ISO 3166-2 region boundaries from OSM via gol query
 2. Parse regions to get list of ISO3166-2 codes
-3. For each region in parallel:
+3. For each region in parallel (independent chain):
    a. Extract region boundary (split into individual GeoJSON files)
-   b. Clip coastline land polygons to region boundary (Ogr2OgrOperator)
-   c. Dissolve clipped polygons into single geometry (Ogr2OgrOperator)
-   d. Export GeoPackage with geodesic area via ST_Area (Ogr2OgrOperator)
-   e. Export GeoJSON and GeoParquet in parallel (Ogr2OgrOperator)
+   b. Clip coastline land polygons to region boundary (Docker ogr2ogr)
+   c. Dissolve clipped polygons into single geometry (Docker ogr2ogr)
+   d. Export GeoPackage with geodesic area via ST_Area (Docker ogr2ogr)
+   e. Export GeoJSON and GeoParquet in parallel (Docker ogr2ogr)
    f. Upload all formats to R2
 """
 
@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 from datetime import timedelta
 
 from airflow.providers.docker.operators.docker import DockerOperator
-from airflow.sdk import DAG, task
+from airflow.sdk import DAG, task, task_group
 from docker.types import Mount
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
@@ -37,13 +38,31 @@ from openplanetdata.airflow.defaults import (
     R2INDEX_CONNECTION_ID,
     SHARED_PLANET_OSM_GOL_PATH,
 )
-from openplanetdata.airflow.operators.ogr2ogr import DOCKER_USER, Ogr2OgrOperator
+from openplanetdata.airflow.operators.ogr2ogr import DOCKER_USER
 
 REGION_TAGS = ["boundaries", "regions", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/regions"
 OPENSTREETMAP_REGIONS_GEOJSON = f"{WORK_DIR}/openstreetmap-regions.geojson"
 COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.gpkg"
+GDAL_IMAGE = "ghcr.io/osgeo/gdal:ubuntu-full-latest"
+
+
+def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
+    """Run ogr2ogr in the GDAL Docker container, mirroring Ogr2OgrOperator."""
+    import docker
+    client = docker.from_env()
+    cmd = shlex.join(["ogr2ogr", *args])
+    client.containers.run(
+        image=GDAL_IMAGE,
+        command=f"bash -c {shlex.quote(cmd)}",
+        environment=env or {},
+        mounts=[Mount(**DOCKER_MOUNT)],
+        remove=True,
+        stderr=True,
+        stdout=True,
+        user=DOCKER_USER,
+    )
 
 
 with DAG(
@@ -142,83 +161,77 @@ with DAG(
         for code in codes:
             os.makedirs(f"{WORK_DIR}/{code}", exist_ok=True)
 
-    @task
-    def make_clip_args(codes: list[str]) -> list[dict]:
-        return [
-            {
-                "args": [
-                    "-f", "GPKG", f"{WORK_DIR}/{code}/clipped.gpkg",
-                    COASTLINE_PATH, "land_polygons",
-                    "-clipsrc", f"{WORK_DIR}/split/{code}.geojson",
-                    "-makevalid",
-                    "-nln", "clipped",
-                ],
-            }
-            for code in codes
-        ]
+    @task_group(group_display_name="Process Region")
+    def process_region(code: str) -> None:
+        """Per-region independent pipeline: clip → dissolve → export."""
 
-    @task
-    def make_dissolve_args(codes: list[str]) -> list[dict]:
-        return [
-            {
-                "args": [
-                    "-f", "GPKG", f"{WORK_DIR}/{code}/dissolved.gpkg",
-                    f"{WORK_DIR}/{code}/clipped.gpkg",
-                    "-dialect", "sqlite",
-                    "-sql", "SELECT ST_Union(geom) AS geom FROM clipped",
-                    "-nln", "dissolved",
-                ],
-            }
-            for code in codes
-        ]
+        @task(task_display_name="Clip Coastline")
+        def clip_coastline(code: str) -> str:
+            _run_ogr2ogr([
+                "-f", "GPKG", f"{WORK_DIR}/{code}/clipped.gpkg",
+                COASTLINE_PATH, "land_polygons",
+                "-clipsrc", f"{WORK_DIR}/split/{code}.geojson",
+                "-makevalid",
+                "-nln", "clipped",
+            ])
+            return code
 
-    @task
-    def make_export_gpkg_args(codes: list[str]) -> list[dict]:
-        return [
-            {
-                "args": [
-                    "-f", "GPKG", f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg",
-                    f"{WORK_DIR}/{code}/dissolved.gpkg",
-                    "-dialect", "sqlite",
-                    "-sql", f"""SELECT geom, '{code.replace("-", ":", 1)}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
-                    "-nln", code,
-                ],
-            }
-            for code in codes
-        ]
+        @task(task_display_name="Dissolve")
+        def dissolve(code: str) -> str:
+            _run_ogr2ogr([
+                "-f", "GPKG", f"{WORK_DIR}/{code}/dissolved.gpkg",
+                f"{WORK_DIR}/{code}/clipped.gpkg",
+                "-dialect", "sqlite",
+                "-sql", "SELECT ST_Union(geom) AS geom FROM clipped",
+                "-nln", "dissolved",
+            ])
+            return code
 
-    @task
-    def make_export_geojson_args(codes: list[str]) -> list[dict]:
-        return [
-            {
-                "environment": {"OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
-                "args": [
-                    "-f", "GeoJSON", f"{WORK_DIR}/{code}/{code}-latest.boundary.geojson",
-                    f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg", code,
-                    "-nln", code,
-                ],
-            }
-            for code in codes
-        ]
+        @task(task_display_name="Export GeoPackage")
+        def export_gpkg(code: str) -> str:
+            iso_code = code.replace("-", ":", 1)
+            _run_ogr2ogr([
+                "-f", "GPKG", f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg",
+                f"{WORK_DIR}/{code}/dissolved.gpkg",
+                "-dialect", "sqlite",
+                "-sql", f"""SELECT geom, '{iso_code}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
+                "-nln", code,
+            ])
+            return code
 
-    @task
-    def make_export_parquet_args(codes: list[str]) -> list[dict]:
-        return [
-            {
-                "args": [
-                    "-f", "Parquet", f"{WORK_DIR}/{code}/{code}-latest.boundary.parquet",
-                    f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg", code,
-                    "-nln", code,
-                ],
-            }
-            for code in codes
-        ]
+        @task(task_display_name="Export GeoJSON")
+        def export_geojson(code: str) -> None:
+            _run_ogr2ogr(
+                ["-f", "GeoJSON", f"{WORK_DIR}/{code}/{code}-latest.boundary.geojson",
+                 f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg", code,
+                 "-nln", code],
+                env={"OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
+            )
 
-    @task(task_display_name="Upload Region")
+        @task(task_display_name="Export GeoParquet")
+        def export_parquet(code: str) -> None:
+            _run_ogr2ogr([
+                "-f", "Parquet", f"{WORK_DIR}/{code}/{code}-latest.boundary.parquet",
+                f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg", code,
+                "-nln", code,
+            ])
+
+        clipped = clip_coastline(code)
+        dissolved = dissolve(clipped)
+        gpkg = export_gpkg(dissolved)
+        export_geojson(gpkg)
+        export_parquet(gpkg)
+
+    @task(task_display_name="Upload Region", trigger_rule="all_done")
     def upload_region(code: str) -> dict:
         """Upload all formats for a single region to R2."""
-        hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
         region_dir = f"{WORK_DIR}/{code}"
+
+        if not os.path.exists(f"{region_dir}/{code}-latest.boundary.gpkg"):
+            print(f"Skipping upload for {code}: output files not found")
+            return {"code": code, "status": "skipped"}
+
+        hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
 
         for ext, subfolder, media_type in [
             ("gpkg", "geopackage", "application/geopackage+sqlite3"),
@@ -226,8 +239,6 @@ with DAG(
             ("parquet", "geoparquet", "application/vnd.apache.parquet"),
         ]:
             source = f"{region_dir}/{code}-latest.boundary.{ext}"
-            if not os.path.exists(source):
-                raise FileNotFoundError(f"Missing output: {source}")
             hook.upload(
                 bucket=R2_BUCKET,
                 category="boundary",
@@ -277,39 +288,11 @@ with DAG(
 
     region_dirs = prepare_region_dirs(codes)
 
-    clip = Ogr2OgrOperator.partial(
-        task_id="clip_coastline",
-        task_display_name="Clip Coastline",
-    ).expand_kwargs(make_clip_args(codes))
+    process_groups = process_region.expand(code=codes)
+    [region_dirs, coastline_dl] >> process_groups
 
-    dissolve = Ogr2OgrOperator.partial(
-        task_id="dissolve",
-        task_display_name="Dissolve",
-        trigger_rule="all_done",
-    ).expand_kwargs(make_dissolve_args(codes))
-
-    export_gpkg = Ogr2OgrOperator.partial(
-        task_id="export_gpkg",
-        task_display_name="Export GeoPackage",
-        trigger_rule="all_done",
-    ).expand_kwargs(make_export_gpkg_args(codes))
-
-    export_geojson = Ogr2OgrOperator.partial(
-        task_id="export_geojson",
-        task_display_name="Export GeoJSON",
-        trigger_rule="all_done",
-    ).expand_kwargs(make_export_geojson_args(codes))
-
-    export_parquet = Ogr2OgrOperator.partial(
-        task_id="export_parquet",
-        task_display_name="Export GeoParquet",
-        trigger_rule="all_done",
-    ).expand_kwargs(make_export_parquet_args(codes))
-
-    upload_results = upload_region.override(trigger_rule="all_done").expand(code=codes)
-
-    # Dependencies
-    [region_dirs, coastline_dl] >> clip >> dissolve >> export_gpkg >> [export_geojson, export_parquet] >> upload_results
+    upload_results = upload_region.expand(code=codes)
+    process_groups >> upload_results
 
     report = report_failures(codes)
     upload_results >> report >> done()
