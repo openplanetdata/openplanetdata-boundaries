@@ -134,7 +134,7 @@ with DAG(
             with open(region_file, "w", encoding="utf-8") as fh:
                 json.dump({"type": "FeatureCollection", "features": features}, fh)
 
-        return sorted(region_features.keys())[:10]
+        return sorted(region_features.keys())
 
     @task(task_display_name="Prepare Region Directories")
     def prepare_region_dirs(codes: list[str]) -> None:
