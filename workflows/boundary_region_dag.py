@@ -79,7 +79,6 @@ def _run_region_pipeline(code: str) -> str | None:
     Safe to call from threads. Returns code on failure, None on success.
     """
     region_dir = f"{WORK_DIR}/{code}"
-    iso_code = code.replace("-", ":", 1)
 
     # Skip already-processed regions so batch retries are idempotent.
     # Check all three outputs — a previous crash may have left only the .gpkg.
@@ -116,7 +115,7 @@ def _run_region_pipeline(code: str) -> str | None:
             "-f", "GPKG", f"{region_dir}/{code}-latest.boundary.gpkg",
             f"{region_dir}/dissolved.gpkg",
             "-dialect", "sqlite",
-            "-sql", f"""SELECT geom, '{iso_code}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
+            "-sql", f"""SELECT geom, '{code}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
             "-nln", code,
         ])
 
