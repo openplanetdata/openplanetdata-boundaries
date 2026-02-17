@@ -130,7 +130,7 @@ with DAG(
         return sorted(region_features.keys())
 
     @task(task_display_name="Prepare Region Directories")
-    def prepare_region_dirs(codes: list[str]) -> None:
+    def prepare_region_output_dirs(codes: list[str]) -> None:
         """Create output directories for each region."""
         for code in codes:
             os.makedirs(f"{WORK_DIR}/{code}", exist_ok=True)
@@ -282,7 +282,7 @@ with DAG(
     codes = split_osm_region_boundaries_file_per_region_code()
     extract_region_boundaries_from_osm >> codes
 
-    region_dirs = prepare_region_dirs(codes)
+    region_dirs = prepare_region_output_dirs(codes)
 
     process_groups = process_region.expand(code=codes)
     [region_dirs, coastline_dl] >> process_groups
