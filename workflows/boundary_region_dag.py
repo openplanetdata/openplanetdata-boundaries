@@ -78,7 +78,7 @@ with DAG(
     description="Monthly ISO 3166-2 region boundary extraction from OSM",
     doc_md=__doc__,
     max_active_runs=1,
-    max_active_tasks=32,
+    max_active_tasks=64,
     schedule="0 6 1 * *",
     tags=["boundaries", "regions", "openplanetdata"],
 ) as dag:
