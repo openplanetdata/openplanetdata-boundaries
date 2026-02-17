@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 from airflow.exceptions import AirflowException
-from airflow.sdk import DAG, Asset, task
+from airflow.sdk import DAG, Asset, TaskGroup, task
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
@@ -58,6 +58,7 @@ GDAL_IMAGE = "ghcr.io/osgeo/gdal:ubuntu-full-latest"
 # Keep max_active_tasks × BATCH_WORKERS ≤ 48 to avoid OOM on a 128Gi node.
 BATCH_SIZE = 32
 BATCH_WORKERS = 2
+PLANET_BASENAME = f"{WORK_DIR}/planet-latest.regions"
 
 
 def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
@@ -317,6 +318,60 @@ with DAG(
         """Clean up working directory."""
         shutil.rmtree(WORK_DIR, ignore_errors=True)
 
+    @task(task_display_name="Merge & Export Planet Regions")
+    def merge_and_export_planet_regions() -> None:
+        """Merge all region GPKGs into a single planet file and export formats."""
+        planet_gpkg = f"{PLANET_BASENAME}.gpkg"
+        planet_geojson = f"{PLANET_BASENAME}.geojson"
+        planet_parquet = f"{PLANET_BASENAME}.parquet"
+
+        codes = sorted(
+            f[:-12] for f in os.listdir(WORK_DIR) if f.endswith(".osm.geojson")
+        )
+        first = True
+        for code in codes:
+            src_gpkg = f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg"
+            if not os.path.exists(src_gpkg):
+                print(f"[{code}] Skipping (no GPKG)")
+                continue
+            args = ["-f", "GPKG"]
+            if not first:
+                args.append("-append")
+            args += [planet_gpkg, src_gpkg, code, "-nln", "regions"]
+            _run_ogr2ogr(args)
+            first = False
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_geojson = ex.submit(_run_ogr2ogr, [
+                "-f", "GeoJSON", planet_geojson,
+                planet_gpkg, "regions",
+                "-nln", "regions",
+            ], {"OGR_GEOJSON_MAX_OBJ_SIZE": "0"})
+            f_parquet = ex.submit(_run_ogr2ogr, [
+                "-f", "Parquet", planet_parquet,
+                planet_gpkg, "regions",
+                "-nln", "regions",
+            ])
+            f_geojson.result()
+            f_parquet.result()
+
+    @task(task_display_name="Upload Planet File")
+    def upload_planet_file(source: str, ext: str, media_type: str, subfolder: str) -> dict:
+        """Upload a planet regions aggregate file to R2."""
+        hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
+        return hook.upload(
+            bucket=R2_BUCKET,
+            category="boundary",
+            destination_filename=f"planet-latest.regions.{ext}",
+            destination_path=f"boundaries/regions/planet/{subfolder}",
+            destination_version="v1",
+            entity="planet",
+            extension=ext,
+            media_type=media_type,
+            source=source,
+            tags=REGION_TAGS + ["planet", subfolder],
+        )
+
     # Task flow
     dirs = ensure_work_dir_exists()
     gol_dl = download_planet_gol()
@@ -331,5 +386,22 @@ with DAG(
     coastline_dl >> process_groups
 
     report = report_failures()
-    process_groups >> report >> done()
-    process_groups >> cleanup()
+    process_groups >> report
+
+    with TaskGroup(group_id="planet_regions", group_display_name="Aggregate Planet Regions"):
+        merge = merge_and_export_planet_regions()
+        pu_gpkg = upload_planet_file.override(task_display_name="Upload Planet GeoPackage")(
+            f"{PLANET_BASENAME}.gpkg", "gpkg", "application/geopackage+sqlite3", "geopackage",
+        )
+        pu_geojson = upload_planet_file.override(task_display_name="Upload Planet GeoJSON")(
+            f"{PLANET_BASENAME}.geojson", "geojson", "application/geo+json", "geojson",
+        )
+        pu_parquet = upload_planet_file.override(task_display_name="Upload Planet GeoParquet")(
+            f"{PLANET_BASENAME}.parquet", "parquet", "application/vnd.apache.parquet", "geoparquet",
+        )
+        merge >> [pu_gpkg, pu_geojson, pu_parquet]
+
+    process_groups >> merge
+    done_task = done()
+    [report, pu_gpkg, pu_geojson, pu_parquet] >> done_task
+    [pu_gpkg, pu_geojson, pu_parquet] >> cleanup()
