@@ -93,6 +93,7 @@ def _run_region_pipeline(code: str) -> str | None:
     try:
         os.makedirs(region_dir, exist_ok=True)
 
+        print(f"[{code}] clip")
         _run_ogr2ogr([
             "-f", "GPKG", f"{region_dir}/clipped.gpkg",
             SHARED_PLANET_COASTLINE_GPKG_PATH, "land_polygons",
@@ -101,6 +102,7 @@ def _run_region_pipeline(code: str) -> str | None:
             "-nln", "clipped",
         ])
 
+        print(f"[{code}] dissolve")
         _run_ogr2ogr([
             "-f", "GPKG", f"{region_dir}/dissolved.gpkg",
             f"{region_dir}/clipped.gpkg",
@@ -109,6 +111,7 @@ def _run_region_pipeline(code: str) -> str | None:
             "-nln", "dissolved",
         ])
 
+        print(f"[{code}] export gpkg")
         _run_ogr2ogr([
             "-f", "GPKG", f"{region_dir}/{code}-latest.boundary.gpkg",
             f"{region_dir}/dissolved.gpkg",
@@ -117,6 +120,7 @@ def _run_region_pipeline(code: str) -> str | None:
             "-nln", code,
         ])
 
+        print(f"[{code}] export geojson+parquet")
         # Export GeoJSON and GeoParquet in parallel.
         with ThreadPoolExecutor(max_workers=2) as ex:
             f_geojson = ex.submit(_run_ogr2ogr, [
@@ -135,7 +139,12 @@ def _run_region_pipeline(code: str) -> str | None:
         return None
 
     except Exception as e:
-        print(f"[{code}] Processing failed: {e}")
+        from docker.errors import ContainerError
+        if isinstance(e, ContainerError):
+            stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+            print(f"[{code}] Processing failed (exit {e.exit_status}):\n{stderr.strip()}")
+        else:
+            print(f"[{code}] Processing failed: {e}")
         return code
 
 
