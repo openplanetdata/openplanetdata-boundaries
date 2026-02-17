@@ -257,7 +257,7 @@ with DAG(
         all_codes = sorted(region_features.keys())
         return [all_codes[i:i + BATCH_SIZE] for i in range(0, len(all_codes), BATCH_SIZE)]
 
-    @task(task_display_name="Process Batch", retries=3)
+    @task(task_display_name="Process Batch", retries=1)
     def process_batch(codes: list[str]) -> None:
         """Process a batch: ogr2ogr pipeline in parallel, then upload from main thread."""
         # Step 1: Run ogr2ogr pipeline in parallel threads (Docker SDK is thread-safe).
