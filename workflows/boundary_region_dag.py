@@ -82,7 +82,11 @@ def _run_region_pipeline(code: str) -> str | None:
     iso_code = code.replace("-", ":", 1)
 
     # Skip already-processed regions so batch retries are idempotent.
-    if os.path.exists(f"{region_dir}/{code}-latest.boundary.gpkg"):
+    # Check all three outputs — a previous crash may have left only the .gpkg.
+    if all(
+        os.path.exists(f"{region_dir}/{code}-latest.boundary.{ext}")
+        for ext in ("gpkg", "geojson", "parquet")
+    ):
         print(f"[{code}] Already processed, skipping")
         return None
 
