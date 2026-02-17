@@ -48,7 +48,7 @@ with DAG(
     doc_md=__doc__,
     max_active_runs=1,
     max_active_tasks=32,
-    schedule="0 4 1 * *",
+    schedule="0 7 * * 1",
     tags=["boundaries", "countries", "openplanetdata"],
 ) as dag:
 

@@ -192,7 +192,7 @@ with DAG(
     doc_md=__doc__,
     max_active_runs=1,
     max_active_tasks=24,  # 24 batches × BATCH_WORKERS=2 → 48 concurrent regions (memory-safe)
-    schedule="0 6 1 * *",
+    schedule="0 8 * * 1",
     tags=["boundaries", "regions", "openplanetdata"],
 ) as dag:
 

@@ -48,7 +48,7 @@ with DAG(
     description="Monthly continent boundary extraction from OSM coastline",
     doc_md=__doc__,
     max_active_runs=1,
-    schedule="0 5 1 * *",
+    schedule="0 6 * * 1",
     tags=["boundaries", "continents", "openplanetdata"],
 ) as dag:
 

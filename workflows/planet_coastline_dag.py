@@ -48,10 +48,10 @@ with DAG(
         "owner": "openplanetdata",
         "queue": "cortex"
     },
-    description="Daily planet coastline extraction from OSM planet PBF",
+    description="Weekly planet coastline extraction from OSM planet PBF",
     doc_md=__doc__,
     max_active_runs=1,
-    schedule="0 14 * * *",
+    schedule="0 2 * * 1",
     tags=["boundaries", "coastline", "openplanetdata", "planet"],
 ) as dag:
 
