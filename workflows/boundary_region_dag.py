@@ -42,7 +42,7 @@ from openplanetdata.airflow.operators.ogr2ogr import DOCKER_USER, Ogr2OgrOperato
 REGION_TAGS = ["boundaries", "regions", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/regions"
-OPENSTREETMAP_REGIONS_GEOJSON = f"{WORK_DIR}/openstreetmap_regions.geojson"
+OPENSTREETMAP_REGIONS_GEOJSON = f"{WORK_DIR}/openstreetmap-regions.geojson"
 COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.gpkg"
 
 
