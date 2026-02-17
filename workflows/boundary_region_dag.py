@@ -200,58 +200,52 @@ with DAG(
             return code
 
         @task(task_display_name="Export GeoJSON")
-        def export_geojson(code: str) -> None:
+        def export_geojson(code: str) -> str:
             _run_ogr2ogr(
                 ["-f", "GeoJSON", f"{WORK_DIR}/{code}/{code}-latest.boundary.geojson",
                  f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg", code,
                  "-nln", code],
                 env={"OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
             )
+            return code
 
         @task(task_display_name="Export GeoParquet")
-        def export_parquet(code: str) -> None:
+        def export_parquet(code: str) -> str:
             _run_ogr2ogr([
                 "-f", "Parquet", f"{WORK_DIR}/{code}/{code}-latest.boundary.parquet",
                 f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg", code,
                 "-nln", code,
             ])
+            return code
+
+        @task(task_display_name="Upload")
+        def upload(code: str) -> None:
+            hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
+            region_dir = f"{WORK_DIR}/{code}"
+            for ext, subfolder, media_type in [
+                ("gpkg", "geopackage", "application/geopackage+sqlite3"),
+                ("geojson", "geojson", "application/geo+json"),
+                ("parquet", "geoparquet", "application/vnd.apache.parquet"),
+            ]:
+                hook.upload(
+                    bucket=R2_BUCKET,
+                    category="boundary",
+                    destination_filename=f"{code}-latest.boundary.{ext}",
+                    destination_path=f"boundaries/regions/{code}/{subfolder}",
+                    destination_version="v1",
+                    entity=code.replace("-", ":", 1),
+                    extension=ext,
+                    media_type=media_type,
+                    source=f"{region_dir}/{code}-latest.boundary.{ext}",
+                    tags=REGION_TAGS + [code, subfolder],
+                )
 
         clipped = clip_coastline(code)
         dissolved = dissolve(clipped)
         gpkg = export_gpkg(dissolved)
-        export_geojson(gpkg)
-        export_parquet(gpkg)
-
-    @task(task_display_name="Upload Region", trigger_rule="all_done")
-    def upload_region(code: str) -> dict:
-        """Upload all formats for a single region to R2."""
-        region_dir = f"{WORK_DIR}/{code}"
-
-        if not os.path.exists(f"{region_dir}/{code}-latest.boundary.gpkg"):
-            print(f"Skipping upload for {code}: output files not found")
-            return {"code": code, "status": "skipped"}
-
-        hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
-
-        for ext, subfolder, media_type in [
-            ("gpkg", "geopackage", "application/geopackage+sqlite3"),
-            ("geojson", "geojson", "application/geo+json"),
-            ("parquet", "geoparquet", "application/vnd.apache.parquet"),
-        ]:
-            source = f"{region_dir}/{code}-latest.boundary.{ext}"
-            hook.upload(
-                bucket=R2_BUCKET,
-                category="boundary",
-                destination_filename=f"{code}-latest.boundary.{ext}",
-                destination_path=f"boundaries/regions/{code}/{subfolder}",
-                destination_version="v1",
-                entity=code.replace("-", ":", 1),
-                extension=ext,
-                media_type=media_type,
-                source=source,
-                tags=REGION_TAGS + [code, subfolder],
-            )
-        return {"code": code, "status": "uploaded"}
+        geojson = export_geojson(gpkg)
+        parquet = export_parquet(gpkg)
+        upload([geojson, parquet])
 
     @task(task_display_name="Report Failures", trigger_rule="all_done")
     def report_failures(codes: list[str]) -> None:
@@ -291,9 +285,6 @@ with DAG(
     process_groups = process_region.expand(code=codes)
     [region_dirs, coastline_dl] >> process_groups
 
-    upload_results = upload_region.expand(code=codes)
-    process_groups >> upload_results
-
     report = report_failures(codes)
-    upload_results >> report >> done()
-    upload_results >> cleanup()
+    process_groups >> report >> done()
+    process_groups >> cleanup()
