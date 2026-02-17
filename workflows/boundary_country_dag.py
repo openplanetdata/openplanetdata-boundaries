@@ -70,6 +70,7 @@ with DAG(
         "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
         "queue": "cortex",
+        "retries": 1,
     },
     description="Monthly country boundary extraction from OSM",
     doc_md=__doc__,
