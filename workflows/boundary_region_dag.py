@@ -104,6 +104,7 @@ def _run_region_pipeline(code: str) -> str | None:
             SHARED_PLANET_COASTLINE_GPKG_PATH, "land_polygons",
             "-clipsrc", f"{WORK_DIR}/{code}.osm.geojson",
             "-makevalid",
+            "-nlt", "MULTIPOLYGON",
             "-nln", "clipped",
         ])
 

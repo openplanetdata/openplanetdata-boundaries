@@ -254,6 +254,7 @@ with DAG(
                     "-f", "GPKG", clipped_path,
                     SHARED_PLANET_COASTLINE_GPKG_PATH, "land_polygons",
                     "-clipsrc", raw_geojson,
+                    "-nlt", "MULTIPOLYGON",
                     "-nln", "clipped",
                 ],
             )

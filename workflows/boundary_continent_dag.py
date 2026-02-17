@@ -248,6 +248,7 @@ with DAG(
                     "-clipsrc", COOKIE_CUTTER_PATH,
                     "-clipsrclayer", "continent_cutter",
                     "-clipsrcwhere", f"continent = '{db_key}'",
+                    "-nlt", "MULTIPOLYGON",
                     "-nln", "clipped",
                 ],
             )
