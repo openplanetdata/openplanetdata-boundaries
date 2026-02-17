@@ -7,7 +7,6 @@ Produces Asset: coastline_gpkg (triggers downstream DAGs)
 
 import shutil
 from datetime import timedelta
-from pathlib import Path
 
 from airflow.exceptions import AirflowException
 from airflow.providers.docker.operators.docker import DockerOperator
