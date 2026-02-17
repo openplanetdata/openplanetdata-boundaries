@@ -55,15 +55,14 @@ BATCH_SIZE = 32
 BATCH_WORKERS = 2
 
 
-def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
-    """Run ogr2ogr inside the GDAL Docker container."""
+def _run_bash_in_gdal(bash_script: str, env: dict | None = None) -> None:
+    """Run a bash script inside the GDAL Docker container."""
     import docker
     from docker.types import Mount
 
-    cmd = shlex.join(["ogr2ogr", *args])
     docker.from_env().containers.run(
         image=GDAL_IMAGE,
-        command=f"bash -c {shlex.quote(cmd)}",
+        command=f"bash -c {shlex.quote(bash_script)}",
         environment=env or {},
         mounts=[Mount(**DOCKER_MOUNT)],
         remove=True,
@@ -71,6 +70,11 @@ def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
         stdout=True,
         user=DOCKER_USER,
     )
+
+
+def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
+    """Run ogr2ogr inside the GDAL Docker container."""
+    _run_bash_in_gdal(shlex.join(["ogr2ogr", *args]), env)
 
 
 def _run_region_pipeline(code: str) -> str | None:
@@ -93,13 +97,22 @@ def _run_region_pipeline(code: str) -> str | None:
     try:
         os.makedirs(region_dir, exist_ok=True)
 
-        _run_ogr2ogr([
-            "-f", "GPKG", f"{region_dir}/clipped.gpkg",
-            SHARED_PLANET_COASTLINE_GPKG_PATH, "land_polygons",
-            "-clipsrc", f"{WORK_DIR}/{code}.osm.geojson",
-            "-makevalid",
-            "-nln", "clipped",
-        ])
+        # Pre-convert the clip source to GPKG with a known layer name, applying
+        # -makevalid and -skipfailures to handle regions with invalid geometry
+        # (e.g. ZA-NL whose .osm.geojson causes "cannot load source clip geometry").
+        # Both steps run in a single Docker container to avoid extra startup overhead.
+        _run_bash_in_gdal(
+            shlex.join([
+                "ogr2ogr", "-f", "GPKG", "/tmp/clip.gpkg",
+                f"{WORK_DIR}/{code}.osm.geojson",
+                "-makevalid", "-skipfailures", "-nln", "clip",
+            ]) + " && " + shlex.join([
+                "ogr2ogr", "-f", "GPKG", f"{region_dir}/clipped.gpkg",
+                SHARED_PLANET_COASTLINE_GPKG_PATH, "land_polygons",
+                "-clipsrc", "/tmp/clip.gpkg", "-clipsrclayer", "clip",
+                "-makevalid", "-nln", "clipped",
+            ])
+        )
 
         _run_ogr2ogr([
             "-f", "GPKG", f"{region_dir}/dissolved.gpkg",
