@@ -26,13 +26,12 @@ from airflow.sdk import DAG, TaskGroup, task
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.data.continents import CONTINENTS
-from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID
+from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID, SHARED_PLANET_COASTLINE_GPKG_PATH
 from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
 
 CONTINENT_TAGS = ["boundaries", "continents", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/continents"
-COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.gpkg"
 COOKIE_CUTTER_PATH = f"{WORK_DIR}/continent-cookie-cutter.gpkg"
 
 
@@ -61,7 +60,7 @@ with DAG(
     def download_coastline() -> DownloadItem:
         """Download coastline data from R2."""
         return DownloadItem(
-            destination=COASTLINE_PATH,
+            destination=SHARED_PLANET_COASTLINE_GPKG_PATH,
             source_filename="planet-latest.coastline.gpkg",
             source_path="boundaries/coastline/geopackage",
             source_version="v1",
@@ -165,7 +164,7 @@ with DAG(
                 task_display_name="Clip Coastline",
                 args=[
                     "-f", "GPKG", clipped_path,
-                    COASTLINE_PATH, "land_polygons",
+                    SHARED_PLANET_COASTLINE_GPKG_PATH, "land_polygons",
                     "-clipsrc", COOKIE_CUTTER_PATH,
                     "-clipsrclayer", "continent_cutter",
                     "-clipsrcwhere", f"continent = '{db_key}'",
