@@ -115,11 +115,11 @@ with DAG(
                 iso_code = feature.get("properties", {}).get("ISO3166-2")
                 if not iso_code:
                     continue
-                safe_code = iso_code.replace(":", "-")
-                region_features.setdefault(safe_code, []).append(feature)
+                osm_region_code = iso_code.replace(":", "-")
+                region_features.setdefault(osm_region_code, []).append(feature)
 
-        for safe_code, features in region_features.items():
-            region_file = f"{WORK_DIR}/{safe_code}.geojson"
+        for osm_region_code, features in region_features.items():
+            region_file = f"{WORK_DIR}/{osm_region_code}.geojson"
             with open(region_file, "w", encoding="utf-8") as fh:
                 json.dump({"type": "FeatureCollection", "features": features}, fh)
 
