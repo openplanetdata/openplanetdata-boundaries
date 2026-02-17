@@ -218,34 +218,38 @@ with DAG(
             ])
             return code
 
-        @task(task_display_name="Upload")
-        def upload(code: str) -> None:
-            hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
-            region_dir = f"{WORK_DIR}/{code}"
-            for ext, subfolder, media_type in [
-                ("gpkg", "geopackage", "application/geopackage+sqlite3"),
-                ("geojson", "geojson", "application/geo+json"),
-                ("parquet", "geoparquet", "application/vnd.apache.parquet"),
-            ]:
-                hook.upload(
-                    bucket=R2_BUCKET,
-                    category="boundary",
-                    destination_filename=f"{code}-latest.boundary.{ext}",
-                    destination_path=f"boundaries/regions/{code}/{subfolder}",
-                    destination_version="v1",
-                    entity=code.replace("-", ":", 1),
-                    extension=ext,
-                    media_type=media_type,
-                    source=f"{region_dir}/{code}-latest.boundary.{ext}",
-                    tags=REGION_TAGS + [code, subfolder],
-                )
+        def _upload(code: str, ext: str, subfolder: str, media_type: str) -> None:
+            R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID).upload(
+                bucket=R2_BUCKET,
+                category="boundary",
+                destination_filename=f"{code}-latest.boundary.{ext}",
+                destination_path=f"boundaries/regions/{code}/{subfolder}",
+                destination_version="v1",
+                entity=code.replace("-", ":", 1),
+                extension=ext,
+                media_type=media_type,
+                source=f"{WORK_DIR}/{code}/{code}-latest.boundary.{ext}",
+                tags=REGION_TAGS + [code, subfolder],
+            )
+
+        @task(task_display_name="Upload GeoPackage")
+        def upload_gpkg(code: str) -> None:
+            _upload(code, "gpkg", "geopackage", "application/geopackage+sqlite3")
+
+        @task(task_display_name="Upload GeoJSON")
+        def upload_geojson(code: str) -> None:
+            _upload(code, "geojson", "geojson", "application/geo+json")
+
+        @task(task_display_name="Upload GeoParquet")
+        def upload_parquet(code: str) -> None:
+            _upload(code, "parquet", "geoparquet", "application/vnd.apache.parquet")
 
         clipped = clip_coastline(code)
         dissolved = dissolve(clipped)
         gpkg = export_gpkg(dissolved)
-        geojson = export_geojson(gpkg)
-        parquet = export_parquet(gpkg)
-        upload([geojson, parquet])
+        upload_gpkg(gpkg)
+        upload_geojson(export_geojson(gpkg))
+        upload_parquet(export_parquet(gpkg))
 
     @task(task_display_name="Report Failures", trigger_rule="all_done")
     def report_failures(codes: list[str]) -> None:
