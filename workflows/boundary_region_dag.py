@@ -14,7 +14,7 @@ Pipeline:
    d. Export GeoJSON and GeoParquet in parallel (Docker ogr2ogr)
    e. Upload all formats to R2 in parallel
 
-Throughput: max_active_tasks(4) × BATCH_WORKERS(4) = 16 concurrent regions (memory-safe for 128Gi node)
+Throughput: max_active_tasks(8) × BATCH_WORKERS(3) = 24 concurrent regions (memory-safe for 128Gi node)
 """
 
 from __future__ import annotations
@@ -50,9 +50,9 @@ GDAL_IMAGE = "ghcr.io/osgeo/gdal:ubuntu-full-latest"
 # Batching: BATCH_SIZE regions per Airflow task, BATCH_WORKERS processed in parallel within each batch.
 # Total concurrent regions = max_active_tasks × BATCH_WORKERS.
 # Coastline GPKG is ~3GB; each ogr2ogr clip loads it into memory (~5-10GB/process).
-# Keep max_active_tasks × BATCH_WORKERS ≤ 16 to avoid OOM on a 128Gi node.
-BATCH_SIZE = 50
-BATCH_WORKERS = 4
+# Keep max_active_tasks × BATCH_WORKERS ≤ 24 to avoid OOM on a 128Gi node.
+BATCH_SIZE = 32
+BATCH_WORKERS = 3
 
 
 def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
@@ -180,7 +180,7 @@ with DAG(
     description="ISO3166-2 region boundary extraction from OSM",
     doc_md=__doc__,
     max_active_runs=1,
-    max_active_tasks=4,  # 4 batches × BATCH_WORKERS=4 → 16 concurrent regions (memory-safe)
+    max_active_tasks=8,  # 8 batches × BATCH_WORKERS=3 → 24 concurrent regions (memory-safe)
     schedule="0 6 1 * *",
     tags=["boundaries", "regions", "openplanetdata"],
 ) as dag:
