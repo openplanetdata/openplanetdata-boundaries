@@ -9,10 +9,11 @@ Pipeline (per region):
 2. Parse regions to get list of ISO3166-2 codes
 3. For each region in parallel:
    a. Extract region boundary (split into individual GeoJSON files)
-   b. Dissolve into single geometry (Ogr2OgrOperator)
-   c. Export GeoPackage with geodesic area via ST_Area (Ogr2OgrOperator)
-   d. Export GeoJSON and GeoParquet in parallel (Ogr2OgrOperator)
-   e. Upload all formats to R2
+   b. Clip coastline land polygons to region boundary (Ogr2OgrOperator)
+   c. Dissolve clipped polygons into single geometry (Ogr2OgrOperator)
+   d. Export GeoPackage with geodesic area via ST_Area (Ogr2OgrOperator)
+   e. Export GeoJSON and GeoParquet in parallel (Ogr2OgrOperator)
+   f. Upload all formats to R2
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ REGION_TAGS = ["boundaries", "regions", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/regions"
 RAW_GEOJSON = f"{WORK_DIR}/raw.geojson"
+COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.gpkg"
 
 
 with DAG(
@@ -75,6 +77,20 @@ with DAG(
             source_filename="planet-latest.osm.gol",
             source_path="osm/planet/gol",
             source_version="v2",
+        )
+
+    @task.r2index_download(
+        task_display_name="Download Planet Coastline",
+        bucket=R2_BUCKET,
+        r2index_conn_id=R2INDEX_CONNECTION_ID,
+    )
+    def download_coastline() -> DownloadItem:
+        """Download coastline GPKG from R2."""
+        return DownloadItem(
+            destination=COASTLINE_PATH,
+            source_filename="planet-latest.coastline.gpkg",
+            source_path="boundaries/coastline/geopackage",
+            source_version="v1",
         )
 
     @task(task_display_name="Prepare Directory")
@@ -127,14 +143,28 @@ with DAG(
             os.makedirs(f"{WORK_DIR}/{code}", exist_ok=True)
 
     @task
+    def make_clip_args(codes: list[str]) -> list[dict]:
+        return [
+            {
+                "args": [
+                    "-f", "GPKG", f"{WORK_DIR}/{code}/clipped.gpkg",
+                    COASTLINE_PATH, "land_polygons",
+                    "-clipsrc", f"{WORK_DIR}/split/{code}.geojson",
+                    "-nln", "clipped",
+                ],
+            }
+            for code in codes
+        ]
+
+    @task
     def make_dissolve_args(codes: list[str]) -> list[dict]:
         return [
             {
                 "args": [
                     "-f", "GPKG", f"{WORK_DIR}/{code}/dissolved.gpkg",
-                    f"{WORK_DIR}/split/{code}.geojson",
+                    f"{WORK_DIR}/{code}/clipped.gpkg",
                     "-dialect", "sqlite",
-                    "-sql", f'SELECT ST_Union(geometry) AS geom FROM "{code}"',
+                    "-sql", "SELECT ST_Union(geom) AS geom FROM clipped",
                     "-nln", "dissolved",
                 ],
             }
@@ -223,12 +253,19 @@ with DAG(
     # Task flow
     dirs = prepare_directory()
     gol_dl = download_planet_gol()
-    dirs >> gol_dl >> extract_all
+    coastline_dl = download_coastline()
+    dirs >> [gol_dl, coastline_dl]
+    gol_dl >> extract_all
 
     codes = split_regions_into_files()
     extract_all >> codes
 
     region_dirs = prepare_region_dirs(codes)
+
+    clip = Ogr2OgrOperator.partial(
+        task_id="clip_coastline",
+        task_display_name="Clip Coastline",
+    ).expand_kwargs(make_clip_args(codes))
 
     dissolve = Ogr2OgrOperator.partial(
         task_id="dissolve",
@@ -253,7 +290,7 @@ with DAG(
     upload_results = upload_region.expand(code=codes)
 
     # Dependencies
-    region_dirs >> dissolve >> export_gpkg >> [export_geojson, export_parquet] >> upload_results
+    [region_dirs, coastline_dl] >> clip >> dissolve >> export_gpkg >> [export_geojson, export_parquet] >> upload_results
 
     upload_results >> done()
     upload_results >> cleanup()
