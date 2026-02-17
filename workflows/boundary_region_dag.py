@@ -285,24 +285,28 @@ with DAG(
     dissolve = Ogr2OgrOperator.partial(
         task_id="dissolve",
         task_display_name="Dissolve",
+        trigger_rule="all_done",
     ).expand_kwargs(make_dissolve_args(codes))
 
     export_gpkg = Ogr2OgrOperator.partial(
         task_id="export_gpkg",
         task_display_name="Export GeoPackage",
+        trigger_rule="all_done",
     ).expand_kwargs(make_export_gpkg_args(codes))
 
     export_geojson = Ogr2OgrOperator.partial(
         task_id="export_geojson",
         task_display_name="Export GeoJSON",
+        trigger_rule="all_done",
     ).expand_kwargs(make_export_geojson_args(codes))
 
     export_parquet = Ogr2OgrOperator.partial(
         task_id="export_parquet",
         task_display_name="Export GeoParquet",
+        trigger_rule="all_done",
     ).expand_kwargs(make_export_parquet_args(codes))
 
-    upload_results = upload_region.expand(code=codes)
+    upload_results = upload_region.override(trigger_rule="all_done").expand(code=codes)
 
     # Dependencies
     [region_dirs, coastline_dl] >> clip >> dissolve >> export_gpkg >> [export_geojson, export_parquet] >> upload_results
