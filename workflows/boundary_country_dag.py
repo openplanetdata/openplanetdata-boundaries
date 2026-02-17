@@ -106,6 +106,7 @@ with DAG(
             source_filename="planet-latest.coastline.gpkg",
             source_path="boundaries/coastline/geopackage",
             source_version="v1",
+            verify_checksum=False,
         )
 
     @task(task_display_name="Prepare Directories")
