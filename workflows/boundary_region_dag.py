@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 from airflow.sdk import DAG, task, task_group
@@ -118,10 +119,13 @@ with DAG(
                 osm_region_code = iso_code.replace(":", "-")
                 region_features.setdefault(osm_region_code, []).append(feature)
 
-        for osm_region_code, features in region_features.items():
-            region_file = f"{WORK_DIR}/{osm_region_code}.osm.geojson"
-            with open(region_file, "w", encoding="utf-8") as fh:
+        def write_region_file(item: tuple) -> None:
+            osm_region_code, features = item
+            with open(f"{WORK_DIR}/{osm_region_code}.osm.geojson", "w", encoding="utf-8") as fh:
                 json.dump({"type": "FeatureCollection", "features": features}, fh)
+
+        with ThreadPoolExecutor() as executor:
+            executor.map(write_region_file, region_features.items())
 
         return sorted(region_features.keys())
 
