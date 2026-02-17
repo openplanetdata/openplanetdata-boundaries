@@ -20,15 +20,14 @@ import os
 import shutil
 from datetime import timedelta
 
-from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.sdk import DAG, TaskGroup, task
-from docker.types import Mount
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.data.countries import COUNTRIES
-from openplanetdata.airflow.defaults import DOCKER_MOUNT, OPENPLANETDATA_IMAGE, OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID, SHARED_PLANET_OSM_GOL_PATH
-from openplanetdata.airflow.operators.ogr2ogr import DOCKER_USER, Ogr2OgrOperator
+from openplanetdata.airflow.defaults import OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID, SHARED_PLANET_OSM_GOL_PATH
+from openplanetdata.airflow.operators.gol import GolOperator
+from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
 
 COUNTRY_TAGS = ["boundaries", "countries", "openplanetdata"]
 
@@ -166,16 +165,11 @@ with DAG(
         output_parquet = f"{output_basename}.parquet"
 
         with TaskGroup(group_id=slug, group_display_name=f"Extract {name}"):
-            extract = DockerOperator(
+            extract = GolOperator(
                 task_id="extract_boundary",
                 task_display_name="Extract Boundary",
-                image=OPENPLANETDATA_IMAGE,
-                command=["bash", "-c", f'gol query {SHARED_PLANET_OSM_GOL_PATH} \'a["ISO3166-1:alpha2"="{code}"]\' -f geojson > {raw_geojson}'],
-                auto_remove="success",
-                force_pull=True,
-                mount_tmp_dir=False,
-                mounts=[Mount(**DOCKER_MOUNT)],
-                user=DOCKER_USER,
+                args=["query", SHARED_PLANET_OSM_GOL_PATH, f'a["ISO3166-1:alpha2"="{code}"]', "-f", "geojson"],
+                output_file=raw_geojson,
             )
 
             clip = Ogr2OgrOperator(

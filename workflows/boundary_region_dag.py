@@ -23,27 +23,24 @@ import os
 import shutil
 from datetime import timedelta
 
-from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.sdk import DAG, task, task_group
-from docker.types import Mount
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.defaults import (
-    DOCKER_MOUNT,
-    OPENPLANETDATA_IMAGE,
     OPENPLANETDATA_WORK_DIR,
     R2_BUCKET,
     R2INDEX_CONNECTION_ID,
+    SHARED_PLANET_COASTLINE_GPKG_PATH,
     SHARED_PLANET_OSM_GOL_PATH,
 )
-from openplanetdata.airflow.operators.ogr2ogr import DOCKER_USER, Ogr2OgrOperator
+from openplanetdata.airflow.operators.gol import GolOperator
+from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
 
 REGION_TAGS = ["boundaries", "regions", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/regions"
 OPENSTREETMAP_REGIONS_GEOJSON = f"{WORK_DIR}/openstreetmap-regions.geojson"
-COASTLINE_PATH = f"{WORK_DIR}/planet-latest.coastline.gpkg"
 
 
 with DAG(
@@ -56,13 +53,27 @@ with DAG(
         "owner": "openplanetdata",
         "queue": "cortex",
     },
-    description="Monthly ISO 3166-2 region boundary extraction from OSM",
+    description="ISO3166-2 region boundary extraction from OSM",
     doc_md=__doc__,
     max_active_runs=1,
     max_active_tasks=64,
     schedule="0 6 1 * *",
     tags=["boundaries", "regions", "openplanetdata"],
 ) as dag:
+
+    @task.r2index_download(
+        task_display_name="Download Planet Coastline",
+        bucket=R2_BUCKET,
+        r2index_conn_id=R2INDEX_CONNECTION_ID,
+    )
+    def download_coastline() -> DownloadItem:
+        """Download coastline GPKG from R2."""
+        return DownloadItem(
+            destination=SHARED_PLANET_COASTLINE_GPKG_PATH,
+            source_filename="planet-latest.coastline.gpkg",
+            source_path="boundaries/coastline/geopackage",
+            source_version="v1",
+        )
 
     @task.r2index_download(
         task_display_name="Download Planet GOL",
@@ -79,35 +90,16 @@ with DAG(
             source_version="v2",
         )
 
-    @task.r2index_download(
-        task_display_name="Download Planet Coastline",
-        bucket=R2_BUCKET,
-        r2index_conn_id=R2INDEX_CONNECTION_ID,
-    )
-    def download_coastline() -> DownloadItem:
-        """Download coastline GPKG from R2."""
-        return DownloadItem(
-            destination=COASTLINE_PATH,
-            source_filename="planet-latest.coastline.gpkg",
-            source_path="boundaries/coastline/geopackage",
-            source_version="v1",
-        )
-
     @task(task_display_name="Prepare Directory")
-    def prepare_directory() -> None:
+    def ensure_work_dir_exists() -> None:
         """Create working directory."""
         os.makedirs(WORK_DIR, exist_ok=True)
 
-    extract_all = DockerOperator(
+    extract_all = GolOperator(
         task_id="extract_all_regions",
-        task_display_name="Extract All Regions",
-        image=OPENPLANETDATA_IMAGE,
-        command=["bash", "-c", f'gol query {SHARED_PLANET_OSM_GOL_PATH} \'a["ISO3166-2"]\' -f geojson > {OPENSTREETMAP_REGIONS_GEOJSON}'],
-        auto_remove="success",
-        force_pull=True,
-        mount_tmp_dir=False,
-        mounts=[Mount(**DOCKER_MOUNT)],
-        user=DOCKER_USER,
+        task_display_name="Extract All ISO3166-2 Boundaries from OSM",
+        args=["query", SHARED_PLANET_OSM_GOL_PATH, 'a["ISO3166-2"]', "-f", "geojson"],
+        output_file=OPENSTREETMAP_REGIONS_GEOJSON,
     )
 
     @task(task_display_name="Split Regions into Files")
@@ -151,7 +143,7 @@ with DAG(
             task_display_name="Clip Coastline",
             args=[
                 "-f", "GPKG", f"{WORK_DIR}/{code}/clipped.gpkg",
-                COASTLINE_PATH, "land_polygons",
+                SHARED_PLANET_COASTLINE_GPKG_PATH, "land_polygons",
                 "-clipsrc", f"{WORK_DIR}/split/{code}.geojson",
                 "-makevalid",
                 "-nln", "clipped",
@@ -280,7 +272,7 @@ with DAG(
         shutil.rmtree(WORK_DIR, ignore_errors=True)
 
     # Task flow
-    dirs = prepare_directory()
+    dirs = ensure_work_dir_exists()
     gol_dl = download_planet_gol()
     coastline_dl = download_coastline()
     dirs >> [gol_dl, coastline_dl]
