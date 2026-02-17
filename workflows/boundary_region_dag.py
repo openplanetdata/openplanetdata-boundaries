@@ -153,7 +153,6 @@ def _upload_region_files(code: str, hook: R2IndexHook) -> str | None:
     Must be called from the main Airflow task thread where the connection
     context is available. Returns code on failure, None on success.
     """
-    iso_code = code.replace("-", ":", 1)
     region_dir = f"{WORK_DIR}/{code}"
     try:
         for ext, subfolder, media_type in [
@@ -167,7 +166,7 @@ def _upload_region_files(code: str, hook: R2IndexHook) -> str | None:
                 destination_filename=f"{code}-latest.boundary.{ext}",
                 destination_path=f"boundaries/regions/{code}/{subfolder}",
                 destination_version="v1",
-                entity=iso_code,
+                entity=code,
                 extension=ext,
                 media_type=media_type,
                 source=f"{region_dir}/{code}-latest.boundary.{ext}",
