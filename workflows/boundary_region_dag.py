@@ -104,7 +104,7 @@ with DAG(
     )
 
     @task(task_display_name="Split Regions into Files")
-    def split_regions_into_files() -> list[str]:
+    def split_osm_region_boundaries_file_per_region_code() -> list[str]:
         """Split raw GeoJSON into individual region files, returns sorted list of osm_region_codes."""
         region_features: dict[str, list] = {}
 
@@ -279,7 +279,7 @@ with DAG(
     dirs >> [gol_dl, coastline_dl]
     gol_dl >> extract_region_boundaries_from_osm
 
-    codes = split_regions_into_files()
+    codes = split_osm_region_boundaries_file_per_region_code()
     extract_region_boundaries_from_osm >> codes
 
     region_dirs = prepare_region_dirs(codes)
