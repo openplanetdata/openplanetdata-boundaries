@@ -71,8 +71,11 @@ def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
     )
 
 
-def _process_region(code: str) -> str | None:
-    """Run the full pipeline for one region. Returns code on failure, None on success."""
+def _run_region_pipeline(code: str) -> str | None:
+    """Run clip → dissolve → export pipeline for one region (no upload).
+
+    Safe to call from threads. Returns code on failure, None on success.
+    """
     region_dir = f"{WORK_DIR}/{code}"
     iso_code = code.replace("-", ":", 1)
 
@@ -123,36 +126,42 @@ def _process_region(code: str) -> str | None:
             f_geojson.result()
             f_parquet.result()
 
-        # Upload all formats in parallel.
-        uploads = [
-            ("gpkg",    "geopackage", "application/geopackage+sqlite3"),
-            ("geojson", "geojson",    "application/geo+json"),
-            ("parquet", "geoparquet", "application/vnd.apache.parquet"),
-        ]
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            futures = [
-                ex.submit(
-                    R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID).upload,
-                    bucket=R2_BUCKET,
-                    category="boundary",
-                    destination_filename=f"{code}-latest.boundary.{ext}",
-                    destination_path=f"boundaries/regions/{code}/{subfolder}",
-                    destination_version="v1",
-                    entity=iso_code,
-                    extension=ext,
-                    media_type=media_type,
-                    source=f"{region_dir}/{code}-latest.boundary.{ext}",
-                    tags=REGION_TAGS + [code, subfolder],
-                )
-                for ext, subfolder, media_type in uploads
-            ]
-            for f in futures:
-                f.result()
-
         return None
 
     except Exception as e:
-        print(f"[{code}] Failed: {e}")
+        print(f"[{code}] Processing failed: {e}")
+        return code
+
+
+def _upload_region_files(code: str, hook: R2IndexHook) -> str | None:
+    """Upload all output files for one region using a pre-created hook.
+
+    Must be called from the main Airflow task thread where the connection
+    context is available. Returns code on failure, None on success.
+    """
+    iso_code = code.replace("-", ":", 1)
+    region_dir = f"{WORK_DIR}/{code}"
+    try:
+        for ext, subfolder, media_type in [
+            ("gpkg",    "geopackage", "application/geopackage+sqlite3"),
+            ("geojson", "geojson",    "application/geo+json"),
+            ("parquet", "geoparquet", "application/vnd.apache.parquet"),
+        ]:
+            hook.upload(
+                bucket=R2_BUCKET,
+                category="boundary",
+                destination_filename=f"{code}-latest.boundary.{ext}",
+                destination_path=f"boundaries/regions/{code}/{subfolder}",
+                destination_version="v1",
+                entity=iso_code,
+                extension=ext,
+                media_type=media_type,
+                source=f"{region_dir}/{code}-latest.boundary.{ext}",
+                tags=REGION_TAGS + [code, subfolder],
+            )
+        return None
+    except Exception as e:
+        print(f"[{code}] Upload failed: {e}")
         return code
 
 
@@ -244,16 +253,27 @@ with DAG(
 
     @task(task_display_name="Process Batch")
     def process_batch(codes: list[str]) -> None:
-        """Process a batch of regions in parallel using ThreadPoolExecutor + Docker SDK."""
+        """Process a batch: ogr2ogr pipeline in parallel, then upload from main thread."""
+        # Step 1: Run ogr2ogr pipeline in parallel threads (Docker SDK is thread-safe).
         with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as executor:
-            results = list(executor.map(_process_region, codes))
+            pipeline_results = list(executor.map(_run_region_pipeline, codes))
 
-        failed = [code for code in results if code is not None]
-        if failed:
-            print(f"Batch failures ({len(failed)}/{len(codes)}):")
-            for code in failed:
+        pipeline_failed = {code for code, r in zip(codes, pipeline_results) if r is not None}
+
+        # Step 2: Upload from the main task thread (R2IndexHook requires Airflow context).
+        hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
+        upload_failed = set()
+        for code in codes:
+            if code not in pipeline_failed:
+                if _upload_region_files(code, hook) is not None:
+                    upload_failed.add(code)
+
+        all_failed = pipeline_failed | upload_failed
+        if all_failed:
+            print(f"Batch failures ({len(all_failed)}/{len(codes)}):")
+            for code in sorted(all_failed):
                 print(f"  {code}")
-            raise AirflowException(f"{len(failed)} region(s) failed: {failed}")
+            raise AirflowException(f"{len(all_failed)} region(s) failed: {sorted(all_failed)}")
 
     @task(task_display_name="Report Failures", trigger_rule="all_done")
     def report_failures() -> None:
