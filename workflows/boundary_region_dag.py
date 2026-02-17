@@ -2,46 +2,158 @@
 Region Boundary DAG - Monthly ISO 3166-2 region boundary extraction.
 
 Schedule: Monthly 1st at 06:00 UTC
-Consumes: planet GOL from R2
+Consumes: planet GOL and coastline GPKG from R2
 
-Pipeline (per region):
+Pipeline:
 1. Extract all ISO 3166-2 region boundaries from OSM via gol query
-2. Parse regions to get list of ISO3166-2 codes
-3. For each region in parallel (independent chain):
-   a. Extract region boundary (split into individual GeoJSON files)
-   b. Clip coastline land polygons to region boundary (Docker ogr2ogr)
-   c. Dissolve clipped polygons into single geometry (Docker ogr2ogr)
-   d. Export GeoPackage with geodesic area via ST_Area (Docker ogr2ogr)
-   e. Export GeoJSON and GeoParquet in parallel (Docker ogr2ogr)
-   f. Upload all formats to R2
+2. Split into individual .osm.geojson files per region code, grouped into batches
+3. For each batch of BATCH_SIZE regions (BATCH_WORKERS processed in parallel):
+   a. Clip coastline land polygons to region boundary (Docker ogr2ogr)
+   b. Dissolve clipped polygons into single geometry (Docker ogr2ogr)
+   c. Export GeoPackage with geodesic area via ST_Area (Docker ogr2ogr)
+   d. Export GeoJSON and GeoParquet in parallel (Docker ogr2ogr)
+   e. Upload all formats to R2 in parallel
+
+Throughput: max_active_tasks batches × BATCH_WORKERS = concurrent regions
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
-from airflow.sdk import DAG, task, task_group
+from airflow.exceptions import AirflowException
+from airflow.sdk import DAG, task
 
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.defaults import (
+    DOCKER_MOUNT,
     OPENPLANETDATA_WORK_DIR,
     R2_BUCKET,
     R2INDEX_CONNECTION_ID,
     SHARED_PLANET_COASTLINE_GPKG_PATH,
     SHARED_PLANET_OSM_GOL_PATH,
 )
-from openplanetdata.airflow.operators.gol import GolOperator
-from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
+from openplanetdata.airflow.operators.gol import DOCKER_USER, GolOperator
 
 REGION_TAGS = ["boundaries", "regions", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/regions"
 OPENSTREETMAP_REGIONS_GEOJSON = f"{WORK_DIR}/openstreetmap-regions.geojson"
+GDAL_IMAGE = "ghcr.io/osgeo/gdal:ubuntu-full-latest"
+
+# Batching: BATCH_SIZE regions per Airflow task, BATCH_WORKERS processed in parallel within each batch.
+# Total concurrent regions = max_active_tasks × BATCH_WORKERS.
+BATCH_SIZE = 50
+BATCH_WORKERS = 8
+
+
+def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
+    """Run ogr2ogr inside the GDAL Docker container."""
+    import docker
+    from docker.types import Mount
+
+    cmd = shlex.join(["ogr2ogr", *args])
+    docker.from_env().containers.run(
+        image=GDAL_IMAGE,
+        command=f"bash -c {shlex.quote(cmd)}",
+        environment=env or {},
+        mounts=[Mount(**DOCKER_MOUNT)],
+        remove=True,
+        stderr=True,
+        stdout=True,
+        user=DOCKER_USER,
+    )
+
+
+def _process_region(code: str) -> str | None:
+    """Run the full pipeline for one region. Returns code on failure, None on success."""
+    region_dir = f"{WORK_DIR}/{code}"
+    iso_code = code.replace("-", ":", 1)
+
+    # Skip already-processed regions so batch retries are idempotent.
+    if os.path.exists(f"{region_dir}/{code}-latest.boundary.gpkg"):
+        print(f"[{code}] Already processed, skipping")
+        return None
+
+    try:
+        os.makedirs(region_dir, exist_ok=True)
+
+        _run_ogr2ogr([
+            "-f", "GPKG", f"{region_dir}/clipped.gpkg",
+            SHARED_PLANET_COASTLINE_GPKG_PATH, "land_polygons",
+            "-clipsrc", f"{WORK_DIR}/{code}.osm.geojson",
+            "-makevalid",
+            "-nln", "clipped",
+        ])
+
+        _run_ogr2ogr([
+            "-f", "GPKG", f"{region_dir}/dissolved.gpkg",
+            f"{region_dir}/clipped.gpkg",
+            "-dialect", "sqlite",
+            "-sql", "SELECT ST_Union(geom) AS geom FROM clipped",
+            "-nln", "dissolved",
+        ])
+
+        _run_ogr2ogr([
+            "-f", "GPKG", f"{region_dir}/{code}-latest.boundary.gpkg",
+            f"{region_dir}/dissolved.gpkg",
+            "-dialect", "sqlite",
+            "-sql", f"""SELECT geom, '{iso_code}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
+            "-nln", code,
+        ])
+
+        # Export GeoJSON and GeoParquet in parallel.
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_geojson = ex.submit(_run_ogr2ogr, [
+                "-f", "GeoJSON", f"{region_dir}/{code}-latest.boundary.geojson",
+                f"{region_dir}/{code}-latest.boundary.gpkg", code,
+                "-nln", code,
+            ], {"OGR_GEOJSON_MAX_OBJ_SIZE": "0"})
+            f_parquet = ex.submit(_run_ogr2ogr, [
+                "-f", "Parquet", f"{region_dir}/{code}-latest.boundary.parquet",
+                f"{region_dir}/{code}-latest.boundary.gpkg", code,
+                "-nln", code,
+            ])
+            f_geojson.result()
+            f_parquet.result()
+
+        # Upload all formats in parallel.
+        uploads = [
+            ("gpkg",    "geopackage", "application/geopackage+sqlite3"),
+            ("geojson", "geojson",    "application/geo+json"),
+            ("parquet", "geoparquet", "application/vnd.apache.parquet"),
+        ]
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futures = [
+                ex.submit(
+                    R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID).upload,
+                    bucket=R2_BUCKET,
+                    category="boundary",
+                    destination_filename=f"{code}-latest.boundary.{ext}",
+                    destination_path=f"boundaries/regions/{code}/{subfolder}",
+                    destination_version="v1",
+                    entity=iso_code,
+                    extension=ext,
+                    media_type=media_type,
+                    source=f"{region_dir}/{code}-latest.boundary.{ext}",
+                    tags=REGION_TAGS + [code, subfolder],
+                )
+                for ext, subfolder, media_type in uploads
+            ]
+            for f in futures:
+                f.result()
+
+        return None
+
+    except Exception as e:
+        print(f"[{code}] Failed: {e}")
+        return code
 
 
 with DAG(
@@ -57,7 +169,7 @@ with DAG(
     description="ISO3166-2 region boundary extraction from OSM",
     doc_md=__doc__,
     max_active_runs=1,
-    max_active_tasks=64,
+    max_active_tasks=8,  # 8 batches × BATCH_WORKERS=8 → 64 concurrent regions
     schedule="0 6 1 * *",
     tags=["boundaries", "regions", "openplanetdata"],
 ) as dag:
@@ -103,9 +215,9 @@ with DAG(
         output_file=OPENSTREETMAP_REGIONS_GEOJSON,
     )
 
-    @task(task_display_name="Split Regions into Files")
-    def split_osm_region_boundaries_file_per_region_code() -> list[str]:
-        """Split raw GeoJSON into individual region files, returns sorted list of osm_region_codes."""
+    @task(task_display_name="Split Regions into Batches")
+    def split_osm_region_boundaries_file_per_region_code() -> list[list[str]]:
+        """Split raw GeoJSON into individual .osm.geojson files, returns codes grouped into batches."""
         region_features: dict[str, list] = {}
 
         with open(OPENSTREETMAP_REGIONS_GEOJSON, "r", encoding="utf-8") as fh:
@@ -127,141 +239,36 @@ with DAG(
         with ThreadPoolExecutor() as executor:
             executor.map(write_region_file, region_features.items())
 
-        return sorted(region_features.keys())
+        all_codes = sorted(region_features.keys())
+        return [all_codes[i:i + BATCH_SIZE] for i in range(0, len(all_codes), BATCH_SIZE)]
 
-    @task(task_display_name="Prepare Region Directories")
-    def prepare_region_output_dirs(codes: list[str]) -> None:
-        """Create output directories for each region."""
-        for code in codes:
-            os.makedirs(f"{WORK_DIR}/{code}", exist_ok=True)
+    @task(task_display_name="Process Batch")
+    def process_batch(codes: list[str]) -> None:
+        """Process a batch of regions in parallel using ThreadPoolExecutor + Docker SDK."""
+        with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as executor:
+            results = list(executor.map(_process_region, codes))
 
-    @task_group(group_display_name="Process Region")
-    def process_region(code: str) -> None:
-        """Per-region independent pipeline: clip → dissolve → export → upload."""
-
-        clip = Ogr2OgrOperator(
-            task_id="clip_coastline",
-            task_display_name="Clip Coastline",
-            args=[
-                "-f", "GPKG", f"{WORK_DIR}/{code}/clipped.gpkg",
-                SHARED_PLANET_COASTLINE_GPKG_PATH, "land_polygons",
-                "-clipsrc", f"{WORK_DIR}/{code}.osm.geojson",
-                "-makevalid",
-                "-nln", "clipped",
-            ],
-        )
-
-        dissolve = Ogr2OgrOperator(
-            task_id="dissolve",
-            task_display_name="Dissolve",
-            args=[
-                "-f", "GPKG", f"{WORK_DIR}/{code}/dissolved.gpkg",
-                f"{WORK_DIR}/{code}/clipped.gpkg",
-                "-dialect", "sqlite",
-                "-sql", "SELECT ST_Union(geom) AS geom FROM clipped",
-                "-nln", "dissolved",
-            ],
-        )
-
-        export_gpkg = Ogr2OgrOperator(
-            task_id="export_gpkg",
-            task_display_name="Export GeoPackage",
-            args=[
-                "-f", "GPKG", f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg",
-                f"{WORK_DIR}/{code}/dissolved.gpkg",
-                "-dialect", "sqlite",
-                "-sql", """SELECT geom, '{{ code | replace("-", ":") }}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
-                "-nln", f"{code}",
-            ],
-        )
-
-        export_geojson = Ogr2OgrOperator(
-            task_id="export_geojson",
-            task_display_name="Export GeoJSON",
-            environment={"OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
-            args=[
-                "-f", "GeoJSON", f"{WORK_DIR}/{code}/{code}-latest.boundary.geojson",
-                f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg", f"{code}",
-                "-nln", f"{code}",
-            ],
-        )
-
-        export_parquet = Ogr2OgrOperator(
-            task_id="export_parquet",
-            task_display_name="Export GeoParquet",
-            args=[
-                "-f", "Parquet", f"{WORK_DIR}/{code}/{code}-latest.boundary.parquet",
-                f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg", f"{code}",
-                "-nln", f"{code}",
-            ],
-        )
-
-        @task(task_display_name="Upload GeoPackage")
-        def upload_gpkg(code: str) -> None:
-            R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID).upload(
-                bucket=R2_BUCKET,
-                category="boundary",
-                destination_filename=f"{code}-latest.boundary.gpkg",
-                destination_path=f"boundaries/regions/{code}/geopackage",
-                destination_version="v1",
-                entity=code.replace("-", ":", 1),
-                extension="gpkg",
-                media_type="application/geopackage+sqlite3",
-                source=f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg",
-                tags=REGION_TAGS + [code, "geopackage"],
-            )
-
-        @task(task_display_name="Upload GeoJSON")
-        def upload_geojson(code: str) -> None:
-            R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID).upload(
-                bucket=R2_BUCKET,
-                category="boundary",
-                destination_filename=f"{code}-latest.boundary.geojson",
-                destination_path=f"boundaries/regions/{code}/geojson",
-                destination_version="v1",
-                entity=code.replace("-", ":", 1),
-                extension="geojson",
-                media_type="application/geo+json",
-                source=f"{WORK_DIR}/{code}/{code}-latest.boundary.geojson",
-                tags=REGION_TAGS + [code, "geojson"],
-            )
-
-        @task(task_display_name="Upload GeoParquet")
-        def upload_parquet(code: str) -> None:
-            R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID).upload(
-                bucket=R2_BUCKET,
-                category="boundary",
-                destination_filename=f"{code}-latest.boundary.parquet",
-                destination_path=f"boundaries/regions/{code}/geoparquet",
-                destination_version="v1",
-                entity=code.replace("-", ":", 1),
-                extension="parquet",
-                media_type="application/vnd.apache.parquet",
-                source=f"{WORK_DIR}/{code}/{code}-latest.boundary.parquet",
-                tags=REGION_TAGS + [code, "geoparquet"],
-            )
-
-        gpkg_upload = upload_gpkg(code)
-        geojson_upload = upload_geojson(code)
-        parquet_upload = upload_parquet(code)
-
-        clip >> dissolve >> export_gpkg >> [export_geojson, export_parquet, gpkg_upload]
-        export_geojson >> geojson_upload
-        export_parquet >> parquet_upload
+        failed = [code for code in results if code is not None]
+        if failed:
+            print(f"Batch failures ({len(failed)}/{len(codes)}):")
+            for code in failed:
+                print(f"  {code}")
+            raise AirflowException(f"{len(failed)} region(s) failed: {failed}")
 
     @task(task_display_name="Report Failures", trigger_rule="all_done")
-    def report_failures(codes: list[str]) -> None:
+    def report_failures() -> None:
         """Report regions that failed to produce output files."""
+        all_codes = sorted(f[:-12] for f in os.listdir(WORK_DIR) if f.endswith(".osm.geojson"))
         failed = [
-            code for code in codes
+            code for code in all_codes
             if not os.path.exists(f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg")
         ]
         if failed:
-            print(f"Processing failed for {len(failed)}/{len(codes)} region(s):")
+            print(f"Processing failed for {len(failed)}/{len(all_codes)} region(s):")
             for code in failed:
                 print(f"  {code}")
         else:
-            print(f"All {len(codes)} regions processed successfully.")
+            print(f"All {len(all_codes)} regions processed successfully.")
 
     @task(task_display_name="Done", trigger_rule="all_done")
     def done() -> None:
@@ -279,14 +286,12 @@ with DAG(
     dirs >> [gol_dl, coastline_dl]
     gol_dl >> extract_region_boundaries_from_osm
 
-    codes = split_osm_region_boundaries_file_per_region_code()
-    extract_region_boundaries_from_osm >> codes
+    batches = split_osm_region_boundaries_file_per_region_code()
+    extract_region_boundaries_from_osm >> batches
 
-    region_dirs = prepare_region_output_dirs(codes)
+    process_groups = process_batch.expand(codes=batches)
+    coastline_dl >> process_groups
 
-    process_groups = process_region.expand(code=codes)
-    [region_dirs, coastline_dl] >> process_groups
-
-    report = report_failures(codes)
+    report = report_failures()
     process_groups >> report >> done()
     process_groups >> cleanup()
