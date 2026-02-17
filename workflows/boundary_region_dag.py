@@ -319,7 +319,7 @@ with DAG(
         """Clean up working directory."""
         shutil.rmtree(WORK_DIR, ignore_errors=True)
 
-    @task(task_display_name="Merge & Export Planet Regions")
+    @task(task_display_name="Merge & Export Planet Regions", trigger_rule="all_done")
     def merge_and_export_planet_regions() -> None:
         """Merge all region GPKGs into a single planet file and export formats."""
         planet_gpkg = f"{PLANET_BASENAME}.gpkg"
