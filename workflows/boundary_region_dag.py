@@ -119,7 +119,7 @@ with DAG(
                 region_features.setdefault(safe_code, []).append(feature)
 
         for safe_code, features in region_features.items():
-            region_file = f"{WORK_DIR}/{safe_code}.geojson"
+            region_file = f"{WORK_DIR}/split/{safe_code}.geojson"
             with open(region_file, "w", encoding="utf-8") as fh:
                 json.dump({"type": "FeatureCollection", "features": features}, fh)
 
@@ -141,7 +141,7 @@ with DAG(
             args=[
                 "-f", "GPKG", f"{WORK_DIR}/{code}/clipped.gpkg",
                 SHARED_PLANET_COASTLINE_GPKG_PATH, "land_polygons",
-                "-clipsrc", f"{WORK_DIR}/{code}.geojson",
+                "-clipsrc", f"{WORK_DIR}/split/{code}.geojson",
                 "-makevalid",
                 "-nln", "clipped",
             ],
