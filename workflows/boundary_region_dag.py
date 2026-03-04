@@ -169,7 +169,7 @@ def _upload_region_files(code: str, hook: R2IndexHook) -> str | None:
         ]:
             hook.upload(
                 bucket=R2_BUCKET,
-                category="boundary",
+                category="boundaries",
                 destination_filename=f"{code}-latest.boundary.{ext}",
                 destination_path=f"boundaries/regions/{code}/{subfolder}",
                 destination_version="v1",
@@ -362,7 +362,7 @@ with DAG(
         hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
         return hook.upload(
             bucket=R2_BUCKET,
-            category="boundary",
+            category="boundaries",
             destination_filename=f"planet-latest.regions.{ext}",
             destination_path=f"boundaries/regions/planet/{subfolder}",
             destination_version="v1",

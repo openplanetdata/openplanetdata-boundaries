@@ -154,11 +154,11 @@ with DAG(
     def upload_gpkg() -> list[UploadItem]:
         """Upload GeoPackage to R2."""
         return [UploadItem(
-            category="coastline",
+            category="boundaries",
             destination_filename=f"{UPLOAD_FILENAME_BASE}.gpkg",
             destination_path=f"{UPLOAD_BASE_PATH}/geopackage",
             destination_version="v1",
-            entity="planet",
+            entity="coastline",
             extension="gpkg",
             media_type="application/geopackage+sqlite3",
             source=COASTLINE_GPKG_PATH,
