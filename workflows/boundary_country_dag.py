@@ -276,7 +276,7 @@ with DAG(
                 args=[
                     "-f", "GPKG", output_gpkg, dissolved_path,
                     "-dialect", "sqlite",
-                    "-sql", f"""SELECT geom, '{code}' AS "ISO3166-1:alpha2", '{safe_name}' AS name, ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
+                    "-sql", f"""SELECT geom, '{code}' AS "ISO3166-1:alpha2", '{safe_name}' AS name, CAST(ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS REAL) AS area FROM dissolved""",
                     "-nln", slug,
                 ],
             )
