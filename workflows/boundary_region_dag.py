@@ -176,7 +176,9 @@ def _upload_region_files(code: str, hook: R2IndexHook) -> str | None:
                 entity=code,
                 extension=ext,
                 media_type=media_type,
+                name=code,
                 source=f"{region_dir}/{code}-latest.boundary.{ext}",
+                subcategory="regions",
                 tags=REGION_TAGS + [code, subfolder],
             )
         return None
@@ -370,6 +372,7 @@ with DAG(
             extension=ext,
             media_type=media_type,
             source=source,
+            subcategory="regions",
             tags=REGION_TAGS + ["planet", subfolder],
         )
 

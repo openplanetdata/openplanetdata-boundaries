@@ -137,6 +137,7 @@ with DAG(
     @task(task_display_name="Upload File")
     def upload_file(
         slug: str,
+        continent_name: str,
         source: str,
         ext: str,
         media_type: str,
@@ -153,7 +154,9 @@ with DAG(
             entity=slug,
             extension=ext,
             media_type=media_type,
+            name=continent_name,
             source=source,
+            subcategory="continents",
             tags=CONTINENT_TAGS + [slug, subfolder],
         )
 
@@ -214,6 +217,7 @@ with DAG(
             extension=ext,
             media_type=media_type,
             source=source,
+            subcategory="continents",
             tags=CONTINENT_TAGS + ["planet", subfolder],
         )
 
@@ -297,9 +301,9 @@ with DAG(
                 ],
             )
 
-            upload_gpkg = upload_file.override(task_display_name="Upload GeoPackage")(slug, output_gpkg, "gpkg", "application/geopackage+sqlite3", "geopackage")
-            upload_geojson = upload_file.override(task_display_name="Upload GeoJSON")(slug, output_geojson, "geojson", "application/geo+json", "geojson")
-            upload_parquet = upload_file.override(task_display_name="Upload GeoParquet")(slug, output_parquet, "parquet", "application/vnd.apache.parquet", "geoparquet")
+            upload_gpkg = upload_file.override(task_display_name="Upload GeoPackage")(slug, continent["name"], output_gpkg, "gpkg", "application/geopackage+sqlite3", "geopackage")
+            upload_geojson = upload_file.override(task_display_name="Upload GeoJSON")(slug, continent["name"], output_geojson, "geojson", "application/geo+json", "geojson")
+            upload_parquet = upload_file.override(task_display_name="Upload GeoParquet")(slug, continent["name"], output_parquet, "parquet", "application/vnd.apache.parquet", "geoparquet")
 
             # Dependencies
             [coastline_dl, cookie_dl] >> clip >> dissolve >> export_gpkg

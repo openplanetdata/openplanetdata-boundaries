@@ -161,7 +161,9 @@ with DAG(
             entity="coastline",
             extension="gpkg",
             media_type="application/geopackage+sqlite3",
+            name="Coastline",
             source=COASTLINE_GPKG_PATH,
+            subcategory="coastline",
             tags=UPLOAD_TAGS + ["geopackage"],
         )]
 
@@ -184,7 +186,9 @@ with DAG(
             entity="planet",
             extension="geojson",
             media_type="application/geo+json",
+            name="Coastline",
             source=COASTLINE_GEOJSON_PATH,
+            subcategory="coastline",
             tags=UPLOAD_TAGS + ["geojson"],
         )]
 
@@ -207,7 +211,9 @@ with DAG(
             entity="planet",
             extension="parquet",
             media_type="application/vnd.apache.parquet",
+            name="Coastline",
             source=COASTLINE_PARQUET_PATH,
+            subcategory="coastline",
             tags=UPLOAD_TAGS + ["geoparquet"],
         )]
 
