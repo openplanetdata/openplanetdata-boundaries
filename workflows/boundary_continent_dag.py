@@ -28,7 +28,7 @@ from airflow.sdk import DAG, Asset, TaskGroup, task
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.data.continents import CONTINENTS
-from openplanetdata.airflow.defaults import DOCKER_MOUNT, OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID, SHARED_PLANET_COASTLINE_GPKG_PATH
+from openplanetdata.airflow.defaults import DOCKER_MOUNT, GDAL_IMAGE, OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID, SHARED_PLANET_COASTLINE_GPKG_PATH
 
 COASTLINE_GPKG_ASSET = Asset(
     name="openplanetdata-boundaries-coastline-gpkg",
@@ -41,7 +41,6 @@ CONTINENT_TAGS = ["boundaries", "continents", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/continents"
 COOKIE_CUTTER_PATH = f"{WORK_DIR}/continent-cookie-cutter.gpkg"
-GDAL_IMAGE = "ghcr.io/osgeo/gdal:ubuntu-full-latest"
 PLANET_BASENAME = f"{WORK_DIR}/planet-latest.continents"
 
 

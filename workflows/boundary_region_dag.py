@@ -33,6 +33,7 @@ from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.defaults import (
     DOCKER_MOUNT,
+    GDAL_IMAGE,
     OPENPLANETDATA_WORK_DIR,
     R2_BUCKET,
     R2INDEX_CONNECTION_ID,
@@ -50,7 +51,6 @@ REGION_TAGS = ["boundaries", "regions", "openplanetdata"]
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/regions"
 OPENSTREETMAP_REGIONS_GEOJSON = f"{WORK_DIR}/openstreetmap-regions.geojson"
-GDAL_IMAGE = "ghcr.io/osgeo/gdal:ubuntu-full-latest"
 
 # Batching: BATCH_SIZE regions per Airflow task, BATCH_WORKERS processed in parallel within each batch.
 # Total concurrent regions = max_active_tasks × BATCH_WORKERS.
