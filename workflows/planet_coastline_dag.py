@@ -145,10 +145,6 @@ with DAG(
     @task.r2index_upload(
         task_display_name="Upload GPKG",
         bucket=R2_BUCKET,
-        outlets=[Asset(
-            name="openplanetdata-boundaries-coastline-gpkg",
-            uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
-        )],
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
     def upload_gpkg() -> list[UploadItem]:
@@ -217,9 +213,15 @@ with DAG(
             tags=UPLOAD_TAGS + ["geoparquet"],
         )]
 
-    @task(task_display_name="Done")
+    @task(
+        task_display_name="Done",
+        outlets=[Asset(
+            name="openplanetdata-boundaries-coastline-gpkg",
+            uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
+        )],
+    )
     def done() -> None:
-        """No-op gate task to propagate upstream failures to DAG run state."""
+        """No-op gate task to propagate upstream failures and emit asset event."""
 
     @task(task_display_name="Cleanup", trigger_rule="all_done")
     def cleanup() -> None:
