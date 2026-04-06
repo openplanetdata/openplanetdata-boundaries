@@ -14,7 +14,7 @@ Pipeline:
    d. Export GeoJSON and GeoParquet in parallel (Docker ogr2ogr)
    e. Upload all formats to R2 in parallel
 
-Throughput: max_active_tasks(24) × BATCH_WORKERS(2) = 48 concurrent regions (memory-safe for 128Gi node)
+Throughput: max_active_tasks(32) × BATCH_WORKERS(2) = 64 concurrent regions (memory-safe for 128Gi node)
 """
 
 from __future__ import annotations
@@ -52,10 +52,6 @@ REGION_TAGS = ["boundaries", "regions", "openplanetdata"]
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/regions"
 OPENSTREETMAP_REGIONS_GEOJSON = f"{WORK_DIR}/openstreetmap-regions.geojson"
 
-# Batching: BATCH_SIZE regions per Airflow task, BATCH_WORKERS processed in parallel within each batch.
-# Total concurrent regions = max_active_tasks × BATCH_WORKERS.
-# Coastline GPKG is ~3GB; each ogr2ogr clip loads it into memory (~5-10GB/process).
-# Keep max_active_tasks × BATCH_WORKERS ≤ 48 to avoid OOM on a 128Gi node.
 BATCH_SIZE = 32
 BATCH_WORKERS = 2
 PLANET_BASENAME = f"{WORK_DIR}/planet-latest.regions"
@@ -201,7 +197,7 @@ with DAG(
     description="ISO3166-2 region boundary extraction from OSM",
     doc_md=__doc__,
     max_active_runs=1,
-    max_active_tasks=24,  # 24 batches × BATCH_WORKERS=2 → 48 concurrent regions (memory-safe)
+    max_active_tasks=32,
     schedule=COASTLINE_GPKG_ASSET,
     tags=["boundaries", "regions", "openplanetdata"],
 ) as dag:
@@ -332,18 +328,29 @@ with DAG(
         codes = sorted(
             f[:-12] for f in os.listdir(WORK_DIR) if f.endswith(".osm.geojson")
         )
-        first = True
+
+        vrt_layers = []
         for code in codes:
             src_gpkg = f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg"
             if not os.path.exists(src_gpkg):
                 print(f"[{code}] Skipping (no GPKG)")
                 continue
-            args = ["-f", "GPKG"]
-            if not first:
-                args.append("-append")
-            args += [planet_gpkg, src_gpkg, code, "-nln", "regions"]
-            _run_ogr2ogr(args)
-            first = False
+            vrt_layers.append(
+                f'    <OGRVRTLayer name="{code}">'
+                f"<SrcDataSource>{src_gpkg}</SrcDataSource>"
+                f"<SrcLayer>{code}</SrcLayer>"
+                f"</OGRVRTLayer>"
+            )
+
+        vrt_path = f"{WORK_DIR}/planet-regions-merge.vrt"
+        with open(vrt_path, "w", encoding="utf-8") as fh:
+            fh.write("<OGRVRTDataSource>\n")
+            fh.write('  <OGRVRTUnionLayer name="regions">\n')
+            fh.write("\n".join(vrt_layers))
+            fh.write("\n  </OGRVRTUnionLayer>\n")
+            fh.write("</OGRVRTDataSource>\n")
+
+        _run_ogr2ogr(["-f", "GPKG", planet_gpkg, vrt_path, "regions", "-nln", "regions"])
 
         with ThreadPoolExecutor(max_workers=2) as ex:
             f_geojson = ex.submit(_run_ogr2ogr, [
