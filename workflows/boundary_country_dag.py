@@ -27,7 +27,7 @@ from airflow.sdk import DAG, Asset, TaskGroup, task
 from elaunira.airflow.providers.r2index.hooks import R2IndexHook
 from elaunira.airflow.providers.r2index.operators import DownloadItem
 from openplanetdata.airflow.data.countries import COUNTRIES
-from openplanetdata.airflow.defaults import DOCKER_MOUNT, GDAL_IMAGE, OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID, SHARED_PLANET_COASTLINE_GPKG_PATH, SHARED_PLANET_OSM_GOL_PATH
+from openplanetdata.airflow.defaults import DOCKER_MOUNT, GDAL_FULL_IMAGE, OPENPLANETDATA_WORK_DIR, R2_BUCKET, R2INDEX_CONNECTION_ID, SHARED_PLANET_COASTLINE_GPKG_PATH, SHARED_PLANET_OSM_GOL_PATH
 from openplanetdata.airflow.operators.gol import DOCKER_USER, GolOperator
 from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
 
@@ -49,7 +49,7 @@ def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
 
     cmd = shlex.join(["ogr2ogr", *args])
     docker.from_env().containers.run(
-        image=GDAL_IMAGE,
+        image=GDAL_FULL_IMAGE,
         command=f"bash -c {shlex.quote(cmd)}",
         environment=env or {},
         mounts=[Mount(**DOCKER_MOUNT)],
