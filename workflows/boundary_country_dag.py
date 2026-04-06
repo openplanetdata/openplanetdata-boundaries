@@ -70,6 +70,7 @@ with DAG(
         "owner": "openplanetdata",
         "queue": "cortex",
         "retries": 1,
+        "weight_rule": "elaunira.airflow.priority.OldestFirstPriorityStrategy",
     },
     description="Monthly country boundary extraction from OSM",
     doc_md=__doc__,

@@ -46,7 +46,8 @@ with DAG(
         "execution_timeout": timedelta(hours=1),
         "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
-        "queue": "cortex"
+        "queue": "cortex",
+        "weight_rule": "elaunira.airflow.priority.OldestFirstPriorityStrategy",
     },
     description="Weekly planet coastline extraction from OSM planet PBF",
     doc_md=__doc__,

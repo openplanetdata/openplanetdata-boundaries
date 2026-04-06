@@ -71,6 +71,7 @@ with DAG(
         "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
         "queue": "cortex",
+        "weight_rule": "elaunira.airflow.priority.OldestFirstPriorityStrategy",
     },
     description="Monthly continent boundary extraction from OSM coastline",
     doc_md=__doc__,
