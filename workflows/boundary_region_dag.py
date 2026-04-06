@@ -104,21 +104,12 @@ def _run_region_pipeline(code: str) -> str | None:
             "-nln", "clipped",
         ])
 
-        print(f"[{code}] dissolve")
-        _run_ogr2ogr([
-            "-f", "GPKG", f"{region_dir}/dissolved.gpkg",
-            f"{region_dir}/clipped.gpkg",
-            "-dialect", "sqlite",
-            "-sql", "SELECT ST_Union(geom) AS geom FROM clipped",
-            "-nln", "dissolved",
-        ])
-
-        print(f"[{code}] export gpkg")
+        print(f"[{code}] dissolve+export gpkg")
         _run_ogr2ogr([
             "-f", "GPKG", f"{region_dir}/{code}-latest.boundary.gpkg",
-            f"{region_dir}/dissolved.gpkg",
+            f"{region_dir}/clipped.gpkg",
             "-dialect", "sqlite",
-            "-sql", f"""SELECT geom, '{code}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved""",
+            "-sql", f"""SELECT ST_Union(geom) AS geom, '{code}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(ST_Union(geom), 6933)) / 1000000.0, 2) AS area FROM clipped""",
             "-nln", code,
         ])
 
@@ -137,6 +128,11 @@ def _run_region_pipeline(code: str) -> str | None:
             ])
             f_geojson.result()
             f_parquet.result()
+
+        for tmp in ("clipped.gpkg", "clipped.gpkg-wal", "clipped.gpkg-shm"):
+            path = f"{region_dir}/{tmp}"
+            if os.path.exists(path):
+                os.remove(path)
 
         return None
 
