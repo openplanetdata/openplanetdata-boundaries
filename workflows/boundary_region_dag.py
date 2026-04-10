@@ -44,7 +44,7 @@ from openplanetdata.airflow.operators.gol import DOCKER_USER, GolOperator
 
 COASTLINE_GPKG_ASSET = Asset(
     name="openplanetdata-boundaries-coastline-gpkg",
-    uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
+    uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v2/planet-latest.coastline.gpkg",
 )
 
 REGION_TAGS = ["boundaries", "regions", "openplanetdata"]
@@ -94,6 +94,17 @@ def _run_region_pipeline(code: str) -> str | None:
     try:
         os.makedirs(region_dir, exist_ok=True)
 
+        # Read region name from the source OSM GeoJSON (first feature with a name tag).
+        with open(f"{WORK_DIR}/{code}.osm.geojson", "r", encoding="utf-8") as fh:
+            features = json.load(fh).get("features") or []
+        name = ""
+        for feat in features:
+            n = (feat.get("properties") or {}).get("name")
+            if n:
+                name = n
+                break
+        safe_name = name.replace("'", "''")
+
         print(f"[{code}] clip")
         _run_ogr2ogr([
             "-f", "GPKG", f"{region_dir}/clipped.gpkg",
@@ -109,7 +120,7 @@ def _run_region_pipeline(code: str) -> str | None:
             "-f", "GPKG", f"{region_dir}/{code}-latest.boundary.gpkg",
             f"{region_dir}/clipped.gpkg",
             "-dialect", "sqlite",
-            "-sql", f"""SELECT ST_Union(geom) AS geom, '{code}' AS "ISO3166-2", ROUND(ST_Area(ST_Transform(ST_Union(geom), 6933)) / 1000000.0, 2) AS area FROM clipped""",
+            "-sql", f"""SELECT ST_Union(geom) AS geom, '{code.lower()}' AS slug, '{code}' AS code, '{safe_name}' AS name, ROUND(ST_Area(ST_Transform(ST_Union(geom), 6933)) / 1000000.0, 2) AS area FROM clipped""",
             "-nln", code,
         ])
 
@@ -165,7 +176,7 @@ def _upload_region_files(code: str, hook: R2IndexHook) -> str | None:
                 category="boundaries",
                 destination_filename=f"{code}-latest.boundary.{ext}",
                 destination_path=f"boundaries/regions/{code}/{subfolder}",
-                destination_version="v1",
+                destination_version="v2",
                 entity=code,
                 extension=ext,
                 media_type=media_type,
@@ -210,7 +221,7 @@ with DAG(
             destination=SHARED_PLANET_COASTLINE_GPKG_PATH,
             source_filename="planet-latest.coastline.gpkg",
             source_path="boundaries/coastline/geopackage",
-            source_version="v1",
+            source_version="v2",
         )
 
     @task.r2index_download(
@@ -373,7 +384,7 @@ with DAG(
             category="boundaries",
             destination_filename=f"planet-latest.regions.{ext}",
             destination_path=f"boundaries/regions/planet/{subfolder}",
-            destination_version="v1",
+            destination_version="v2",
             entity="planet",
             extension=ext,
             media_type=media_type,

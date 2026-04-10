@@ -130,7 +130,7 @@ START_TIME=$(date +%s)
 # Step 2: Dissolve using ogr2ogr with SQLite ST_Union on GPKG
 ogr2ogr -f GPKG "$TEMP_DISSOLVED" "$TEMP_CLIPPED" \
     -dialect sqlite \
-    -sql "SELECT ST_Union(geom) AS geom, '$CONTINENT_SLUG' AS continent_slug, '$CONTINENT_CODE' AS continent_code, '$CONTINENT_NAME' AS continent_name FROM clipped" \
+    -sql "SELECT ST_Union(geom) AS geom, '$CONTINENT_SLUG' AS slug, '$CONTINENT_CODE' AS code, '$CONTINENT_NAME' AS name FROM clipped" \
     -nln dissolved \
     2>&1 | grep -v "Warning" || true
 
@@ -159,7 +159,7 @@ EXPORT_START=$(date +%s)
 rm -f "$OUTPUT_GPKG"
 ogr2ogr -f GPKG "$OUTPUT_GPKG" "$TEMP_DISSOLVED" \
     -dialect sqlite \
-    -sql "SELECT geom, continent_slug, continent_code, continent_name, CAST($AREA_KM2 AS REAL) AS area FROM dissolved" \
+    -sql "SELECT geom, slug, code, name, CAST($AREA_KM2 AS REAL) AS area FROM dissolved" \
     -nln "$CONTINENT_SLUG" \
     2>&1 | grep -v "Warning" || true
 GPKG_TIME=$(($(date +%s) - EXPORT_START))

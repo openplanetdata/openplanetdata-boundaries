@@ -155,7 +155,7 @@ with DAG(
             category="boundaries",
             destination_filename=f"{UPLOAD_FILENAME_BASE}.gpkg",
             destination_path=f"{UPLOAD_BASE_PATH}/geopackage",
-            destination_version="v1",
+            destination_version="v2",
             entity="coastline",
             extension="gpkg",
             media_type="application/geopackage+sqlite3",
@@ -170,7 +170,7 @@ with DAG(
         bucket=R2_BUCKET,
         outlets=[Asset(
             name="openplanetdata-boundaries-coastline-geojson",
-            uri=f"s3://{R2_BUCKET}/boundaries/coastline/geojson/v1/planet-latest.coastline.geojson",
+            uri=f"s3://{R2_BUCKET}/boundaries/coastline/geojson/v2/planet-latest.coastline.geojson",
         )],
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
@@ -180,7 +180,7 @@ with DAG(
             category="coastline",
             destination_filename=f"{UPLOAD_FILENAME_BASE}.geojson",
             destination_path=f"{UPLOAD_BASE_PATH}/geojson",
-            destination_version="v1",
+            destination_version="v2",
             entity="planet",
             extension="geojson",
             media_type="application/geo+json",
@@ -195,7 +195,7 @@ with DAG(
         bucket=R2_BUCKET,
         outlets=[Asset(
             name="openplanetdata-boundaries-coastline-geoparquet",
-            uri=f"s3://{R2_BUCKET}/boundaries/coastline/geoparquet/v1/planet-latest.coastline.parquet",
+            uri=f"s3://{R2_BUCKET}/boundaries/coastline/geoparquet/v2/planet-latest.coastline.parquet",
         )],
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
@@ -205,7 +205,7 @@ with DAG(
             category="coastline",
             destination_filename=f"{UPLOAD_FILENAME_BASE}.parquet",
             destination_path=f"{UPLOAD_BASE_PATH}/geoparquet",
-            destination_version="v1",
+            destination_version="v2",
             entity="planet",
             extension="parquet",
             media_type="application/vnd.apache.parquet",
@@ -219,7 +219,7 @@ with DAG(
         task_display_name="Done",
         outlets=[Asset(
             name="openplanetdata-boundaries-coastline-gpkg",
-            uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
+            uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v2/planet-latest.coastline.gpkg",
         )],
     )
     def done() -> None:

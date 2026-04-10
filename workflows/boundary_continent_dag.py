@@ -32,7 +32,7 @@ from openplanetdata.airflow.defaults import DOCKER_MOUNT, GDAL_FULL_IMAGE, OPENP
 
 COASTLINE_GPKG_ASSET = Asset(
     name="openplanetdata-boundaries-coastline-gpkg",
-    uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
+    uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v2/planet-latest.coastline.gpkg",
 )
 from openplanetdata.airflow.operators.gol import DOCKER_USER
 from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
@@ -91,7 +91,7 @@ with DAG(
             destination=SHARED_PLANET_COASTLINE_GPKG_PATH,
             source_filename="planet-latest.coastline.gpkg",
             source_path="boundaries/coastline/geopackage",
-            source_version="v1",
+            source_version="v2",
         )
 
     @task.r2index_download(
@@ -150,7 +150,7 @@ with DAG(
             category="boundaries",
             destination_filename=f"{slug}-latest.boundary.{ext}",
             destination_path=f"boundaries/continents/{slug}/{subfolder}",
-            destination_version="v1",
+            destination_version="v2",
             entity=slug,
             extension=ext,
             media_type=media_type,
@@ -213,7 +213,7 @@ with DAG(
             category="boundaries",
             destination_filename=f"planet-latest.continents.{ext}",
             destination_path=f"boundaries/continents/planet/{subfolder}",
-            destination_version="v1",
+            destination_version="v2",
             entity="planet",
             extension=ext,
             media_type=media_type,
@@ -265,7 +265,7 @@ with DAG(
                 args=[
                     "-f", "GPKG", dissolved_path, clipped_path,
                     "-dialect", "sqlite",
-                    "-sql", f"SELECT ST_Union(geom) AS geom, '{slug}' AS continent_slug, '{code}' AS continent_code, '{name}' AS continent_name FROM clipped",
+                    "-sql", f"SELECT ST_Union(geom) AS geom, '{slug}' AS slug, '{code}' AS code, '{name}' AS name FROM clipped",
                     "-nln", "dissolved",
                 ],
             )
@@ -276,7 +276,7 @@ with DAG(
                 args=[
                     "-f", "GPKG", output_gpkg, dissolved_path,
                     "-dialect", "sqlite",
-                    "-sql", f"SELECT geom, continent_slug, continent_code, continent_name, ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved",
+                    "-sql", f"SELECT geom, slug, code, name, ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved",
                     "-nln", slug,
                 ],
             )

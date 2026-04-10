@@ -33,7 +33,7 @@ from openplanetdata.airflow.operators.ogr2ogr import Ogr2OgrOperator
 
 COASTLINE_GPKG_ASSET = Asset(
     name="openplanetdata-boundaries-coastline-gpkg",
-    uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v1/planet-latest.coastline.gpkg",
+    uri=f"s3://{R2_BUCKET}/boundaries/coastline/geopackage/v2/planet-latest.coastline.gpkg",
 )
 
 COUNTRY_TAGS = ["boundaries", "countries", "openplanetdata"]
@@ -106,7 +106,7 @@ with DAG(
             destination=SHARED_PLANET_COASTLINE_GPKG_PATH,
             source_filename="planet-latest.coastline.gpkg",
             source_path="boundaries/coastline/geopackage",
-            source_version="v1",
+            source_version="v2",
         )
 
     @task(task_display_name="Prepare Directories")
@@ -152,7 +152,7 @@ with DAG(
             category="boundaries",
             destination_filename=f"{slug}-latest.boundary.{ext}",
             destination_path=f"boundaries/countries/{slug}/{subfolder}",
-            destination_version="v1",
+            destination_version="v2",
             entity=slug,
             extension=ext,
             media_type=media_type,
@@ -212,7 +212,7 @@ with DAG(
             category="boundaries",
             destination_filename=f"planet-latest.countries.{ext}",
             destination_path=f"boundaries/countries/planet/{subfolder}",
-            destination_version="v1",
+            destination_version="v2",
             entity="planet",
             extension=ext,
             media_type=media_type,
@@ -281,7 +281,7 @@ with DAG(
                 args=[
                     "-f", "GPKG", output_gpkg, dissolved_path,
                     "-dialect", "sqlite",
-                    "-sql", f"""SELECT geom, '{code}' AS "ISO3166-1:alpha2", '{safe_name}' AS name, CAST(ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS REAL) AS area FROM dissolved""",
+                    "-sql", f"""SELECT geom, '{code.lower()}' AS slug, '{code}' AS code, '{safe_name}' AS name, CAST(ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS REAL) AS area FROM dissolved""",
                     "-nln", slug,
                 ],
             )
