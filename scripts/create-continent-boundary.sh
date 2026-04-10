@@ -65,6 +65,17 @@ DEFAULT_BASENAME="${CONTINENT_SLUG}.boundary"
 OUTPUT_BASENAME="${4:-$DEFAULT_BASENAME}"
 CONTINENT_DB_KEY=${CONTINENT_SLUG//-/_}
 
+# Continent code (ISO-style 2-letter) and capital-case name
+case "$CONTINENT_SLUG" in
+    africa)         CONTINENT_CODE="AF"; CONTINENT_NAME="Africa" ;;
+    antarctica)     CONTINENT_CODE="AN"; CONTINENT_NAME="Antarctica" ;;
+    asia)           CONTINENT_CODE="AS"; CONTINENT_NAME="Asia" ;;
+    europe)         CONTINENT_CODE="EU"; CONTINENT_NAME="Europe" ;;
+    north-america)  CONTINENT_CODE="NA"; CONTINENT_NAME="North America" ;;
+    oceania)        CONTINENT_CODE="OC"; CONTINENT_NAME="Oceania" ;;
+    south-america)  CONTINENT_CODE="SA"; CONTINENT_NAME="South America" ;;
+esac
+
 # Define output file paths
 OUTPUT_GPKG="${OUTPUT_BASENAME}.gpkg"
 OUTPUT_GEOJSON="${OUTPUT_BASENAME}.geojson"
@@ -119,7 +130,7 @@ START_TIME=$(date +%s)
 # Step 2: Dissolve using ogr2ogr with SQLite ST_Union on GPKG
 ogr2ogr -f GPKG "$TEMP_DISSOLVED" "$TEMP_CLIPPED" \
     -dialect sqlite \
-    -sql "SELECT ST_Union(geom) AS geom, '$CONTINENT_DB_KEY' AS continent FROM clipped" \
+    -sql "SELECT ST_Union(geom) AS geom, '$CONTINENT_SLUG' AS continent_slug, '$CONTINENT_CODE' AS continent_code, '$CONTINENT_NAME' AS continent_name FROM clipped" \
     -nln dissolved \
     2>&1 | grep -v "Warning" || true
 
@@ -148,7 +159,7 @@ EXPORT_START=$(date +%s)
 rm -f "$OUTPUT_GPKG"
 ogr2ogr -f GPKG "$OUTPUT_GPKG" "$TEMP_DISSOLVED" \
     -dialect sqlite \
-    -sql "SELECT geom, continent, CAST($AREA_KM2 AS REAL) AS area FROM dissolved" \
+    -sql "SELECT geom, continent_slug, continent_code, continent_name, CAST($AREA_KM2 AS REAL) AS area FROM dissolved" \
     -nln "$CONTINENT_SLUG" \
     2>&1 | grep -v "Warning" || true
 GPKG_TIME=$(($(date +%s) - EXPORT_START))

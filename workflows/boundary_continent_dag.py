@@ -232,6 +232,8 @@ with DAG(
 
     for continent in CONTINENTS:
         slug = continent["slug"]
+        code = continent["code"]
+        name = continent["name"]
         db_key = slug.replace("-", "_")
 
         tmp_dir = f"{WORK_DIR}/{slug}"
@@ -263,7 +265,7 @@ with DAG(
                 args=[
                     "-f", "GPKG", dissolved_path, clipped_path,
                     "-dialect", "sqlite",
-                    "-sql", f"SELECT ST_Union(geom) AS geom, '{db_key}' AS continent FROM clipped",
+                    "-sql", f"SELECT ST_Union(geom) AS geom, '{slug}' AS continent_slug, '{code}' AS continent_code, '{name}' AS continent_name FROM clipped",
                     "-nln", "dissolved",
                 ],
             )
@@ -274,7 +276,7 @@ with DAG(
                 args=[
                     "-f", "GPKG", output_gpkg, dissolved_path,
                     "-dialect", "sqlite",
-                    "-sql", f"SELECT geom, continent, ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved",
+                    "-sql", f"SELECT geom, continent_slug, continent_code, continent_name, ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS area FROM dissolved",
                     "-nln", slug,
                 ],
             )
