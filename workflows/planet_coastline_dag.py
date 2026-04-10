@@ -136,6 +136,7 @@ with DAG(
             "-dialect", "SQLite", "-sql", SQL,
             "-nln", "planet_coastline",
             "-lco", "COMPRESSION=ZSTD",
+            "-lco", "GEOMETRY_NAME=geometry",
         ],
     )
 

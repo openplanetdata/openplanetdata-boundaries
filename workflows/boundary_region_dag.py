@@ -125,6 +125,7 @@ def _run_region_pipeline(code: str) -> str | None:
                 "-f", "Parquet", f"{region_dir}/{code}-latest.boundary.parquet",
                 f"{region_dir}/{code}-latest.boundary.gpkg", code,
                 "-nln", code,
+                "-lco", "GEOMETRY_NAME=geometry",
             ])
             f_geojson.result()
             f_parquet.result()
@@ -358,6 +359,7 @@ with DAG(
                 "-f", "Parquet", planet_parquet,
                 planet_gpkg, "regions",
                 "-nln", "regions",
+                "-lco", "GEOMETRY_NAME=geometry",
             ])
             f_geojson.result()
             f_parquet.result()

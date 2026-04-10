@@ -199,6 +199,7 @@ with DAG(
                 "-f", "Parquet", planet_parquet,
                 planet_gpkg, "continents",
                 "-nln", "continents",
+                "-lco", "GEOMETRY_NAME=geometry",
             ])
             f_geojson.result()
             f_parquet.result()
@@ -298,6 +299,7 @@ with DAG(
                     "-f", "Parquet", output_parquet,
                     output_gpkg, slug,
                     "-nln", slug,
+                    "-lco", "GEOMETRY_NAME=geometry",
                 ],
             )
 

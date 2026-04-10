@@ -275,6 +275,8 @@ def convert_to_geoparquet(
         "-lco",
         "GEOMETRY_ENCODING=GEOARROW",
         "-lco",
+        "GEOMETRY_NAME=geometry",
+        "-lco",
         "ROW_GROUP_SIZE=65536",
         "-nln",
         layer_name,
