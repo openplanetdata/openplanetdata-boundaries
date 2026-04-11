@@ -162,11 +162,11 @@ with DAG(
             tags=COUNTRY_TAGS + [slug, subfolder],
         )
 
-    @task(task_display_name="Done")
+    @task(task_id="countries_done", task_display_name="Done")
     def done() -> None:
         """No-op gate task to propagate upstream failures to DAG run state."""
 
-    @task(task_display_name="Cleanup", trigger_rule="all_done")
+    @task(task_id="countries_cleanup", task_display_name="Cleanup", trigger_rule="all_done")
     def cleanup() -> None:
         """Clean up working directory."""
         shutil.rmtree(WORK_DIR, ignore_errors=True)

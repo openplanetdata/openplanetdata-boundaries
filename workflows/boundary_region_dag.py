@@ -317,11 +317,11 @@ with DAG(
         else:
             print(f"All {len(all_codes)} regions processed successfully.")
 
-    @task(task_display_name="Done", trigger_rule="all_done")
+    @task(task_id="regions_done", task_display_name="Done", trigger_rule="all_done")
     def done() -> None:
         """No-op gate task to propagate upstream failures to DAG run state."""
 
-    @task(task_display_name="Cleanup", trigger_rule="all_done")
+    @task(task_id="regions_cleanup", task_display_name="Cleanup", trigger_rule="all_done")
     def cleanup() -> None:
         """Clean up working directory."""
         shutil.rmtree(WORK_DIR, ignore_errors=True)
