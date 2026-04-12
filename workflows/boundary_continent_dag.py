@@ -265,8 +265,7 @@ with DAG(
                 args=[
                     "-f", "GPKG", dissolved_path, clipped_path,
                     "-dialect", "sqlite",
-                    "-sql", f"SELECT ST_Union(geom) AS geom, '{slug}' AS slug, '{code}' AS code, '{name}' AS name FROM clipped",
-                    "-nlt", "MULTIPOLYGON",
+                    "-sql", f"SELECT ST_CollectionExtract(ST_Union(geom), 3) AS geom, '{slug}' AS slug, '{code}' AS code, '{name}' AS name FROM clipped",
                     "-nln", "dissolved",
                 ],
             )
