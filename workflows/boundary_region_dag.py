@@ -121,6 +121,7 @@ def _run_region_pipeline(code: str) -> str | None:
             f"{region_dir}/clipped.gpkg",
             "-dialect", "sqlite",
             "-sql", f"""SELECT ST_Union(geom) AS geom, '{code.lower()}' AS slug, '{code}' AS code, '{safe_name}' AS name, ROUND(ST_Area(ST_Transform(ST_Union(geom), 6933)) / 1000000.0, 2) AS area FROM clipped""",
+            "-nlt", "MULTIPOLYGON",
             "-nln", code,
         ])
 
