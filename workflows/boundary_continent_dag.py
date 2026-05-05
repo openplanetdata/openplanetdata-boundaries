@@ -332,4 +332,4 @@ with DAG(
 
     upload_tasks >> merge
     [pu_gpkg, pu_geojson, pu_parquet] >> done()
-    [pu_gpkg, pu_geojson, pu_parquet] >> cleanup()
+    [*upload_tasks, pu_gpkg, pu_geojson, pu_parquet] >> cleanup()
