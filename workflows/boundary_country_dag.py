@@ -115,6 +115,25 @@ with DAG(
         for code in sorted(COUNTRIES.keys()):
             os.makedirs(f"{WORK_DIR}/{code}", exist_ok=True)
 
+    @task(task_display_name="Verify Area")
+    def verify_area(gpkg_path: str, layer: str, slug: str, name: str) -> None:
+        """Fail loudly if any feature has a non-positive area (sentinel -1.0)."""
+        import sqlite3
+
+        conn = sqlite3.connect(gpkg_path)
+        try:
+            row = conn.execute(
+                f'SELECT COUNT(*), MIN(area), MAX(area) FROM "{layer}" WHERE area IS NULL OR area <= 0'
+            ).fetchone()
+            bad_count = row[0]
+            if bad_count:
+                raise ValueError(
+                    f"[{slug}] {name}: {bad_count} feature(s) with non-positive area "
+                    f"(min={row[1]}, max={row[2]}) — likely empty/invalid dissolved geometry"
+                )
+        finally:
+            conn.close()
+
     @task(task_display_name="Normalize GeoJSON")
     def normalize_geojson(geojson_path: str) -> None:
         """Normalize GeoJSON FeatureCollection to a single Feature."""
@@ -281,7 +300,7 @@ with DAG(
                 args=[
                     "-f", "GPKG", output_gpkg, dissolved_path,
                     "-dialect", "sqlite",
-                    "-sql", f"""SELECT geom, '{code.lower()}' AS slug, '{code}' AS code, '{safe_name}' AS name, CAST(ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2) AS REAL) AS area FROM dissolved""",
+                    "-sql", f"""SELECT geom, '{code.lower()}' AS slug, '{code}' AS code, '{safe_name}' AS name, CAST(IFNULL(ROUND(ST_Area(ST_Transform(geom, 6933)) / 1000000.0, 2), -1.0) AS REAL) AS area FROM dissolved""",
                     "-nln", slug,
                 ],
             )
@@ -296,6 +315,8 @@ with DAG(
                     "-nln", slug,
                 ],
             )
+
+            verify = verify_area.override(task_id="verify_area")(output_gpkg, slug, slug, name)
 
             normalize = normalize_geojson(output_geojson)
 
@@ -317,7 +338,7 @@ with DAG(
             # Dependencies
             gol_dl >> extract
             [extract, coastline_dl] >> clip >> dissolve >> export_gpkg
-            export_gpkg >> [export_geojson_op, export_parquet_op, upload_gpkg]
+            export_gpkg >> verify >> [export_geojson_op, export_parquet_op, upload_gpkg]
             export_geojson_op >> normalize >> upload_geojson
             export_parquet_op >> upload_parquet
 
