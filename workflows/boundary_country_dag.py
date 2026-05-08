@@ -112,7 +112,7 @@ with DAG(
     @task(task_display_name="Prepare Directories")
     def prepare_directories() -> None:
         """Create working directories for all countries."""
-        for code in sorted(COUNTRIES.keys()):
+        for code in sorted(COUNTRIES, key=lambda k: COUNTRIES[k]["name"]):
             os.makedirs(f"{WORK_DIR}/{code}", exist_ok=True)
 
     @task(task_display_name="Verify Area")
@@ -198,7 +198,7 @@ with DAG(
         planet_parquet = f"{PLANET_BASENAME}.parquet"
 
         first = True
-        for code in sorted(COUNTRIES.keys()):
+        for code in sorted(COUNTRIES, key=lambda k: COUNTRIES[k]["name"]):
             src_gpkg = f"{WORK_DIR}/{code}/{code}-latest.boundary.gpkg"
             args = ["-f", "GPKG"]
             if not first:
@@ -248,7 +248,7 @@ with DAG(
 
     upload_tasks = []
 
-    for code in sorted(COUNTRIES.keys()):
+    for code in sorted(COUNTRIES, key=lambda k: COUNTRIES[k]["name"]):
         country = COUNTRIES[code]
         slug = code
         name = country["name"]

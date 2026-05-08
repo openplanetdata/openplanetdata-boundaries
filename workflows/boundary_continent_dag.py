@@ -110,7 +110,7 @@ with DAG(
     @task(task_display_name="Prepare Directories")
     def prepare_directories() -> None:
         """Create working directories for all continents."""
-        for continent in CONTINENTS:
+        for continent in sorted(CONTINENTS, key=lambda c: c["name"]):
             os.makedirs(f"{WORK_DIR}/{continent['slug']}", exist_ok=True)
 
     @task(task_display_name="Verify Area")
@@ -197,7 +197,7 @@ with DAG(
 
         # Merge continent GPKGs sequentially
         first = True
-        for continent in CONTINENTS:
+        for continent in sorted(CONTINENTS, key=lambda c: c["name"]):
             slug = continent["slug"]
             src_gpkg = f"{WORK_DIR}/{slug}/{slug}-latest.boundary.gpkg"
             args = ["-f", "GPKG"]
@@ -249,7 +249,7 @@ with DAG(
 
     upload_tasks = []
 
-    for continent in CONTINENTS:
+    for continent in sorted(CONTINENTS, key=lambda c: c["name"]):
         slug = continent["slug"]
         code = continent["code"]
         name = continent["name"]
