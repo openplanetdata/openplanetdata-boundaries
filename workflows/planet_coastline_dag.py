@@ -109,6 +109,51 @@ with DAG(
         if exit_code > 2:
             raise AirflowException(f"osmcoastline failed with exit code {exit_code}")
 
+    @task(task_display_name="Verify Continental Coverage", retries=0)
+    def verify_continental_coverage() -> None:
+        """Fail if any continent's interior is missing a continental land polygon.
+
+        Probes a 1° x 1° interior bbox per continent and requires at least one
+        land_polygons feature with an MBR ≥ 1° in each dimension that overlaps
+        the probe. Catches cases where osmcoastline produced fragmented output
+        (e.g. unclosed coastlines breaking a continent's polygon assembly) so a
+        broken file is never published to R2.
+        """
+        import sqlite3
+
+        PROBES = [
+            ("Europe",         1.0,   49.0,   2.0,  50.0),
+            ("North America", -100.0, 40.0,  -99.0, 41.0),
+            ("South America", -55.0, -10.0, -54.0, -9.0),
+            ("Africa",         20.0,  15.0,   21.0, 16.0),
+            ("Asia",           90.0,  60.0,   91.0, 61.0),
+            ("Australia",     135.0, -25.0,  136.0, -24.0),
+        ]
+
+        missing = []
+        conn = sqlite3.connect(COASTLINE_GPKG_PATH)
+        try:
+            for name, xmin, ymin, xmax, ymax in PROBES:
+                n = conn.execute(
+                    "SELECT COUNT(*) FROM rtree_land_polygons_geom "
+                    "WHERE minx <= ? AND maxx >= ? AND miny <= ? AND maxy >= ? "
+                    "AND (maxx - minx) >= 1 AND (maxy - miny) >= 1",
+                    (xmax, xmin, ymax, ymin),
+                ).fetchone()[0]
+                print(f"[{name}] big polygons overlapping ({xmin},{ymin})-({xmax},{ymax}): {n}")
+                if n == 0:
+                    missing.append(f"{name} ({xmin},{ymin})-({xmax},{ymax})")
+        finally:
+            conn.close()
+
+        if missing:
+            raise AirflowException(
+                "Coastline land_polygons missing continental coverage for: "
+                + "; ".join(missing)
+                + " — osmcoastline likely failed to assemble continental polygons "
+                  "(check error_lines/error_points layers). Not uploading to R2."
+            )
+
     @task(task_display_name="Copy GPKG")
     def copy_gpkg() -> None:
         """Copy GPKG so exports can read in parallel without SQLite locks."""
@@ -241,10 +286,13 @@ with DAG(
     geojson_upload = upload_geojson()
     geoparquet_upload = upload_geoparquet()
 
-    osmcoastline_logs_parse >> gpkg_upload
-    osmcoastline_logs_parse >> export_geojson >> geojson_upload
+    coverage_gate = verify_continental_coverage()
+    osmcoastline_logs_parse >> coverage_gate
+
+    coverage_gate >> gpkg_upload
+    coverage_gate >> export_geojson >> geojson_upload
     gpkg_copy = copy_gpkg()
-    osmcoastline_logs_parse >> gpkg_copy >> export_parquet >> geoparquet_upload
+    coverage_gate >> gpkg_copy >> export_parquet >> geoparquet_upload
 
     [gpkg_upload, geojson_upload, geoparquet_upload] >> done()
     [gpkg_upload, geojson_upload, geoparquet_upload] >> cleanup()
