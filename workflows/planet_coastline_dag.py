@@ -271,9 +271,14 @@ with DAG(
     def done() -> None:
         """No-op gate task to propagate upstream failures and emit asset event."""
 
-    @task(task_id="coastline_cleanup", task_display_name="Cleanup", trigger_rule="all_done")
+    @task(task_id="coastline_cleanup", task_display_name="Cleanup", trigger_rule="all_success")
     def cleanup() -> None:
-        """Clean up working directory."""
+        """Clean up working directory.
+
+        Uses ``all_success`` so any upstream failure (notably the continental
+        coverage gate) preserves the GPKG and ``error_lines`` / ``error_points``
+        layers for offline inspection in QGIS.
+        """
         shutil.rmtree(WORK_DIR, ignore_errors=True)
 
     # Task flow
