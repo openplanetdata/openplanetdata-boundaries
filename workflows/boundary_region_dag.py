@@ -23,6 +23,7 @@ import json
 import os
 import shlex
 import shutil
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
@@ -75,10 +76,15 @@ def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
     )
 
 
-def _run_region_pipeline(code: str) -> str | None:
+def _run_region_pipeline(code: str) -> tuple[str, str] | None:
     """Run clip → dissolve → export pipeline for one region (no upload).
 
-    Safe to call from threads. Returns code on failure, None on success.
+    Safe to call from threads. Returns None on success, ("failed", code) on
+    error, or ("skipped", code) when the dissolved geometry is NULL — e.g. a
+    mistagged or broken OSM boundary relation whose coastline clip comes back
+    empty. Skipped regions produce no outputs, so they are excluded from
+    uploads and from the planet-wide merge instead of poisoning it with a
+    NULL-geometry row.
     """
     region_dir = f"{WORK_DIR}/{code}"
 
@@ -124,6 +130,26 @@ def _run_region_pipeline(code: str) -> str | None:
             "-nln", code,
         ])
 
+        # ST_Union over an empty clip result (mistagged or broken OSM
+        # boundary, or no land within it) yields one row with NULL geometry.
+        # Exporting it would poison the planet-wide parquet consumed
+        # downstream, so drop the region's outputs and report it as skipped.
+        gpkg_path = f"{region_dir}/{code}-latest.boundary.gpkg"
+        con = sqlite3.connect(gpkg_path)
+        try:
+            (non_null,) = con.execute(
+                f'SELECT COUNT(*) FROM "{code}" WHERE geom IS NOT NULL'
+            ).fetchone()
+        finally:
+            con.close()
+        if non_null == 0:
+            print(f"[{code}] Dissolved geometry is NULL (empty clip result), skipping region")
+            for tmp in (f"{code}-latest.boundary.gpkg", "clipped.gpkg", "clipped.gpkg-wal", "clipped.gpkg-shm"):
+                path = f"{region_dir}/{tmp}"
+                if os.path.exists(path):
+                    os.remove(path)
+            return ("skipped", code)
+
         print(f"[{code}] export geojson+parquet")
         # Export GeoJSON and GeoParquet in parallel.
         with ThreadPoolExecutor(max_workers=2) as ex:
@@ -155,7 +181,7 @@ def _run_region_pipeline(code: str) -> str | None:
             print(f"[{code}] Processing failed (exit {e.exit_status}):\n{stderr.strip()}")
         else:
             print(f"[{code}] Processing failed: {e}")
-        return code
+        return ("failed", code)
 
 
 def _upload_region_files(code: str, hook: R2IndexHook) -> str | None:
@@ -285,13 +311,18 @@ with DAG(
         with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as executor:
             pipeline_results = list(executor.map(_run_region_pipeline, codes))
 
-        pipeline_failed = {code for code, r in zip(codes, pipeline_results) if r is not None}
+        results = [r for r in pipeline_results if r is not None]
+        pipeline_failed = {code for status, code in results if status == "failed"}
+        pipeline_skipped = {code for status, code in results if status == "skipped"}
+
+        if pipeline_skipped:
+            print(f"Skipped {len(pipeline_skipped)} region(s) with NULL dissolved geometry: {sorted(pipeline_skipped)}")
 
         # Step 2: Upload from the main task thread (R2IndexHook requires Airflow context).
         hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
         upload_failed = set()
         for code in codes:
-            if code not in pipeline_failed:
+            if code not in pipeline_failed and code not in pipeline_skipped:
                 if _upload_region_files(code, hook) is not None:
                     upload_failed.add(code)
 
