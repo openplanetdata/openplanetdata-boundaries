@@ -14,7 +14,14 @@ Pipeline:
    d. Export GeoJSON and GeoParquet in parallel (Docker ogr2ogr)
    e. Upload all formats to R2 in parallel
 
-Throughput: max_active_tasks(32) × BATCH_WORKERS(2) = 64 concurrent regions (memory-safe for 128Gi node)
+Throughput: at most max_active_tasks(32) × BATCH_WORKERS(2) = 64 concurrent
+regions, in practice fewer: each batch reserves PROCESS_BATCH_MEM_GIB slots.
+
+Scheduling policy: every task runs in the shared "cortex" pool, whose slots
+are GiB of memory on the edge host. Each task reserves the most memory it can
+use (Docker containers are capped to the same value), so tasks from every
+project only start when their memory fits. The absolute priority weight of
+1000 sits below the Ipregistry tasks, which always take a free slot first.
 """
 
 from __future__ import annotations
@@ -57,9 +64,29 @@ BATCH_SIZE = 32
 BATCH_WORKERS = 2
 PLANET_BASENAME = f"{WORK_DIR}/planet-latest.regions"
 
+CORTEX_POOL = "cortex"
+OPENPLANETDATA_PRIORITY_WEIGHT = 1000
+# r2index transfers buffer up to 2x CPU cores (64 on cortex) 32 MiB parts
+# in-process, so planet-sized downloads and uploads reserve 4 GiB.
+R2_TRANSFER_MEM_GIB = 4
 
-def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
-    """Run ogr2ogr inside the GDAL Docker container."""
+# Container caps in GiB, reserved as pool slots by the task running them.
+# A region runs clip and dissolve one at a time, then both exports of the
+# already dissolved geometry side by side, so its peak is the larger of
+# REGION_OGR2OGR_MEM_GIB and 2 * REGION_EXPORT_MEM_GIB.
+REGION_OGR2OGR_MEM_GIB = 16
+REGION_EXPORT_MEM_GIB = 4
+PROCESS_BATCH_MEM_GIB = BATCH_WORKERS * max(REGION_OGR2OGR_MEM_GIB, 2 * REGION_EXPORT_MEM_GIB)
+# gol query and the in-process split both hold every ISO 3166-2 boundary.
+EXTRACT_ALL_REGIONS_MEM_GIB = 32
+SPLIT_REGIONS_MEM_GIB = 32
+# The planet merge exports GeoJSON and GeoParquet of all regions side by side.
+MERGE_OGR2OGR_MEM_GIB = 16
+MERGE_MEM_GIB = 2 * MERGE_OGR2OGR_MEM_GIB
+
+
+def _run_ogr2ogr(args: list[str], env: dict | None = None, mem_gib: int = REGION_OGR2OGR_MEM_GIB) -> None:
+    """Run ogr2ogr inside the GDAL Docker container, capped to mem_gib GiB."""
     import docker
     from docker.types import Mount
 
@@ -68,6 +95,7 @@ def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
         image=GDAL_FULL_IMAGE,
         command=f"bash -c {shlex.quote(cmd)}",
         environment=env or {},
+        mem_limit=f"{mem_gib}g",
         mounts=[Mount(**DOCKER_MOUNT)],
         remove=True,
         stderr=True,
@@ -157,13 +185,13 @@ def _run_region_pipeline(code: str) -> tuple[str, str] | None:
                 "-f", "GeoJSON", f"{region_dir}/{code}-latest.boundary.geojson",
                 f"{region_dir}/{code}-latest.boundary.gpkg", code,
                 "-nln", code,
-            ], {"OGR_GEOJSON_MAX_OBJ_SIZE": "0"})
+            ], {"OGR_GEOJSON_MAX_OBJ_SIZE": "0"}, mem_gib=REGION_EXPORT_MEM_GIB)
             f_parquet = ex.submit(_run_ogr2ogr, [
                 "-f", "Parquet", f"{region_dir}/{code}-latest.boundary.parquet",
                 f"{region_dir}/{code}-latest.boundary.gpkg", code,
                 "-nln", code,
                 "-lco", "GEOMETRY_NAME=geometry",
-            ])
+            ], mem_gib=REGION_EXPORT_MEM_GIB)
             f_geojson.result()
             f_parquet.result()
 
@@ -225,8 +253,11 @@ with DAG(
         "execution_timeout": timedelta(hours=2),
         "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
+        "pool": CORTEX_POOL,
+        "pool_slots": 1,
+        "priority_weight": OPENPLANETDATA_PRIORITY_WEIGHT,
         "queue": "cortex",
-        "weight_rule": "elaunira.airflow.priority.OldestFirstPriorityStrategy",
+        "weight_rule": "absolute",
     },
     description="ISO3166-2 region boundary extraction from OSM",
     doc_md=__doc__,
@@ -239,6 +270,7 @@ with DAG(
     @task.r2index_download(
         task_display_name="Download Planet Coastline",
         bucket=R2_BUCKET,
+        pool_slots=R2_TRANSFER_MEM_GIB,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
     def download_coastline() -> DownloadItem:
@@ -253,6 +285,7 @@ with DAG(
     @task.r2index_download(
         task_display_name="Download Planet GOL",
         bucket=R2_BUCKET,
+        pool_slots=R2_TRANSFER_MEM_GIB,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
     def download_planet_gol() -> DownloadItem:
@@ -274,10 +307,12 @@ with DAG(
         task_id="extract_all_regions_from_osm",
         task_display_name="Extract All ISO3166-2 Boundaries from OSM",
         args=["query", SHARED_PLANET_OSM_GOL_PATH, 'a["ISO3166-2"]', "-f", "geojson"],
+        mem_limit=f"{EXTRACT_ALL_REGIONS_MEM_GIB}g",
         output_file=OPENSTREETMAP_REGIONS_GEOJSON,
+        pool_slots=EXTRACT_ALL_REGIONS_MEM_GIB,
     )
 
-    @task(task_display_name="Split Regions into Batches")
+    @task(task_display_name="Split Regions into Batches", pool_slots=SPLIT_REGIONS_MEM_GIB)
     def split_osm_region_boundaries_file_per_region_code() -> list[list[str]]:
         """Split raw GeoJSON into individual .osm.geojson files, returns codes grouped into batches."""
         region_features: dict[str, list] = {}
@@ -304,7 +339,7 @@ with DAG(
         all_codes = sorted(region_features.keys())
         return [all_codes[i:i + BATCH_SIZE] for i in range(0, len(all_codes), BATCH_SIZE)]
 
-    @task(task_display_name="Process Batch", retries=1)
+    @task(task_display_name="Process Batch", pool_slots=PROCESS_BATCH_MEM_GIB, retries=1)
     def process_batch(codes: list[str]) -> None:
         """Process a batch: ogr2ogr pipeline in parallel, then upload from main thread."""
         # Step 1: Run ogr2ogr pipeline in parallel threads (Docker SDK is thread-safe).
@@ -357,7 +392,7 @@ with DAG(
         """Clean up working directory."""
         shutil.rmtree(WORK_DIR, ignore_errors=True)
 
-    @task(task_display_name="Merge & Export Planet Regions", trigger_rule="all_done")
+    @task(task_display_name="Merge & Export Planet Regions", pool_slots=MERGE_MEM_GIB, trigger_rule="all_done")
     def merge_and_export_planet_regions() -> None:
         """Merge all region GPKGs into a single planet file and export formats."""
         planet_gpkg = f"{PLANET_BASENAME}.gpkg"
@@ -389,24 +424,24 @@ with DAG(
             fh.write("\n  </OGRVRTUnionLayer>\n")
             fh.write("</OGRVRTDataSource>\n")
 
-        _run_ogr2ogr(["-f", "GPKG", planet_gpkg, vrt_path, "regions", "-nln", "regions"])
+        _run_ogr2ogr(["-f", "GPKG", planet_gpkg, vrt_path, "regions", "-nln", "regions"], mem_gib=MERGE_OGR2OGR_MEM_GIB)
 
         with ThreadPoolExecutor(max_workers=2) as ex:
             f_geojson = ex.submit(_run_ogr2ogr, [
                 "-f", "GeoJSON", planet_geojson,
                 planet_gpkg, "regions",
                 "-nln", "regions",
-            ], {"OGR_GEOJSON_MAX_OBJ_SIZE": "0"})
+            ], {"OGR_GEOJSON_MAX_OBJ_SIZE": "0"}, mem_gib=MERGE_OGR2OGR_MEM_GIB)
             f_parquet = ex.submit(_run_ogr2ogr, [
                 "-f", "Parquet", planet_parquet,
                 planet_gpkg, "regions",
                 "-nln", "regions",
                 "-lco", "GEOMETRY_NAME=geometry",
-            ])
+            ], mem_gib=MERGE_OGR2OGR_MEM_GIB)
             f_geojson.result()
             f_parquet.result()
 
-    @task(task_display_name="Upload Planet File")
+    @task(task_display_name="Upload Planet File", pool_slots=R2_TRANSFER_MEM_GIB)
     def upload_planet_file(source: str, ext: str, media_type: str, subfolder: str) -> dict:
         """Upload a planet regions aggregate file to R2."""
         hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)

@@ -1,8 +1,14 @@
 """
-Planet Coastline DAG - Daily coastline generation from OSM data.
+Planet Coastline DAG - Weekly coastline generation from OSM data.
 
-Schedule: Daily at 14:00 UTC
+Schedule: Weekly on Monday at 02:00 UTC
 Produces Asset: coastline_gpkg (triggers downstream DAGs)
+
+Scheduling policy: every task runs in the shared "cortex" pool, whose slots
+are GiB of memory on the edge host. Each task reserves the most memory it can
+use (Docker containers are capped to the same value), so tasks from every
+project only start when their memory fits. The absolute priority weight of
+1000 sits below the Ipregistry tasks, which always take a free slot first.
 """
 
 import shutil
@@ -26,6 +32,16 @@ from openplanetdata.airflow.defaults import (
 
 WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/coastline"
 
+CORTEX_POOL = "cortex"
+OPENPLANETDATA_PRIORITY_WEIGHT = 1000
+# r2index transfers buffer up to 2x CPU cores (64 on cortex) 32 MiB parts
+# in-process, so planet-sized downloads and uploads reserve 4 GiB.
+R2_TRANSFER_MEM_GIB = 4
+
+# osmcoastline assembles every coastline way of the planet in memory.
+OSMCOASTLINE_MEM_GIB = 64
+OGR2OGR_MEM_GIB = 16
+
 COASTLINE_GPKG_PATH = f"{WORK_DIR}/coastline.gpkg"
 COASTLINE_GPKG_COPY_PATH = f"{WORK_DIR}/coastline-copy.gpkg"
 COASTLINE_GEOJSON_PATH = f"{WORK_DIR}/coastline.geojson"
@@ -46,8 +62,11 @@ with DAG(
         "execution_timeout": timedelta(hours=1),
         "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
+        "pool": CORTEX_POOL,
+        "pool_slots": 1,
+        "priority_weight": OPENPLANETDATA_PRIORITY_WEIGHT,
         "queue": "cortex",
-        "weight_rule": "elaunira.airflow.priority.OldestFirstPriorityStrategy",
+        "weight_rule": "absolute",
     },
     description="Weekly planet coastline extraction from OSM planet PBF",
     doc_md=__doc__,
@@ -59,6 +78,7 @@ with DAG(
     @task.r2index_download(
         task_display_name="Download Planet PBF",
         bucket=R2_BUCKET,
+        pool_slots=R2_TRANSFER_MEM_GIB,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
         transfer_config=R2TransferConfig(max_concurrency=64, multipart_chunksize=32 * 1024 * 1024),
     )
@@ -87,9 +107,11 @@ with DAG(
             ls -lh {WORK_DIR}
         '""",
         force_pull=True,
+        mem_limit=f"{OSMCOASTLINE_MEM_GIB}g",
         mounts=[Mount(**DOCKER_MOUNT)],
         mount_tmp_dir=False,
         auto_remove="success",
+        pool_slots=OSMCOASTLINE_MEM_GIB,
     )
 
     @task(task_display_name="Parse OSM Coastline Logs", retries=0)
@@ -170,6 +192,8 @@ with DAG(
             "-nln", "planet_coastline",
             "-lco", "RFC7946=YES", "-lco", "COORDINATE_PRECISION=6",
         ],
+        mem_limit=f"{OGR2OGR_MEM_GIB}g",
+        pool_slots=OGR2OGR_MEM_GIB,
     )
 
     export_parquet = Ogr2OgrOperator(
@@ -183,6 +207,8 @@ with DAG(
             "-lco", "COMPRESSION=ZSTD",
             "-lco", "GEOMETRY_NAME=geometry",
         ],
+        mem_limit=f"{OGR2OGR_MEM_GIB}g",
+        pool_slots=OGR2OGR_MEM_GIB,
     )
 
     UPLOAD_BASE_PATH = "boundaries/coastline"
@@ -192,6 +218,7 @@ with DAG(
     @task.r2index_upload(
         task_display_name="Upload GPKG",
         bucket=R2_BUCKET,
+        pool_slots=R2_TRANSFER_MEM_GIB,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
     def upload_gpkg() -> list[UploadItem]:
@@ -213,6 +240,7 @@ with DAG(
     @task.r2index_upload(
         task_display_name="Upload GeoJSON",
         bucket=R2_BUCKET,
+        pool_slots=R2_TRANSFER_MEM_GIB,
         outlets=[Asset(
             name="openplanetdata-boundaries-coastline-geojson",
             uri=f"s3://{R2_BUCKET}/boundaries/coastline/geojson/v2/planet-latest.coastline.geojson",
@@ -238,6 +266,7 @@ with DAG(
     @task.r2index_upload(
         task_display_name="Upload GeoParquet",
         bucket=R2_BUCKET,
+        pool_slots=R2_TRANSFER_MEM_GIB,
         outlets=[Asset(
             name="openplanetdata-boundaries-coastline-geoparquet",
             uri=f"s3://{R2_BUCKET}/boundaries/coastline/geoparquet/v2/planet-latest.coastline.parquet",

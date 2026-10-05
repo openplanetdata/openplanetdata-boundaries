@@ -13,6 +13,12 @@ Per-continent pipeline:
 4. Export GeoJSON and GeoParquet in parallel (Docker ogr2ogr)
 5. Normalize GeoJSON to single Feature
 6. Upload all formats to R2
+
+Scheduling policy: every task runs in the shared "cortex" pool, whose slots
+are GiB of memory on the edge host. Each task reserves the most memory it can
+use (Docker containers are capped to the same value), so tasks from every
+project only start when their memory fits. The absolute priority weight of
+1000 sits below the Ipregistry tasks, which always take a free slot first.
 """
 
 from __future__ import annotations
@@ -43,6 +49,21 @@ WORK_DIR = f"{OPENPLANETDATA_WORK_DIR}/boundaries/continents"
 COOKIE_CUTTER_PATH = f"{WORK_DIR}/continent-cookie-cutter.gpkg"
 PLANET_BASENAME = f"{WORK_DIR}/planet-latest.continents"
 
+CORTEX_POOL = "cortex"
+OPENPLANETDATA_PRIORITY_WEIGHT = 1000
+# r2index transfers buffer up to 2x CPU cores (64 on cortex) 32 MiB parts
+# in-process, so planet-sized downloads and uploads reserve 4 GiB.
+R2_TRANSFER_MEM_GIB = 4
+
+# Container caps in GiB, reserved as pool slots by the task running them.
+# Dissolving a continent unions every land polygon it holds (Asia, Europe).
+OGR2OGR_MEM_GIB = 16
+DISSOLVE_MEM_GIB = 32
+# json.load of a continent GeoJSON (europe is ~620 MB) expands several fold.
+NORMALIZE_MEM_GIB = 8
+# The planet merge runs the GeoJSON and GeoParquet exports side by side.
+MERGE_MEM_GIB = 2 * OGR2OGR_MEM_GIB
+
 
 def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
     """Run ogr2ogr inside the GDAL Docker container."""
@@ -54,6 +75,7 @@ def _run_ogr2ogr(args: list[str], env: dict | None = None) -> None:
         image=GDAL_FULL_IMAGE,
         command=f"bash -c {shlex.quote(cmd)}",
         environment=env or {},
+        mem_limit=f"{OGR2OGR_MEM_GIB}g",
         mounts=[Mount(**DOCKER_MOUNT)],
         remove=True,
         stderr=True,
@@ -70,8 +92,11 @@ with DAG(
         "execution_timeout": timedelta(hours=2),
         "executor": "airflow.providers.edge3.executors.EdgeExecutor",
         "owner": "openplanetdata",
+        "pool": CORTEX_POOL,
+        "pool_slots": 1,
+        "priority_weight": OPENPLANETDATA_PRIORITY_WEIGHT,
         "queue": "cortex",
-        "weight_rule": "elaunira.airflow.priority.OldestFirstPriorityStrategy",
+        "weight_rule": "absolute",
     },
     description="Monthly continent boundary extraction from OSM coastline",
     doc_md=__doc__,
@@ -83,6 +108,7 @@ with DAG(
     @task.r2index_download(
         task_display_name="Download Planet Coastline",
         bucket=R2_BUCKET,
+        pool_slots=R2_TRANSFER_MEM_GIB,
         r2index_conn_id=R2INDEX_CONNECTION_ID,
     )
     def download_coastline() -> DownloadItem:
@@ -132,7 +158,7 @@ with DAG(
         finally:
             conn.close()
 
-    @task(task_display_name="Normalize GeoJSON")
+    @task(task_display_name="Normalize GeoJSON", pool_slots=NORMALIZE_MEM_GIB)
     def normalize_geojson(geojson_path: str) -> None:
         """Normalize GeoJSON FeatureCollection to a single Feature."""
         import json
@@ -188,7 +214,7 @@ with DAG(
         """Clean up working directory."""
         shutil.rmtree(WORK_DIR, ignore_errors=True)
 
-    @task(task_display_name="Merge & Export Planet Continents")
+    @task(task_display_name="Merge & Export Planet Continents", pool_slots=MERGE_MEM_GIB)
     def merge_and_export_planet_continents() -> None:
         """Merge all continent GPKGs into a single planet file and export formats."""
         planet_gpkg = f"{PLANET_BASENAME}.gpkg"
@@ -223,7 +249,7 @@ with DAG(
             f_geojson.result()
             f_parquet.result()
 
-    @task(task_display_name="Upload Planet File")
+    @task(task_display_name="Upload Planet File", pool_slots=R2_TRANSFER_MEM_GIB)
     def upload_planet_file(source: str, ext: str, media_type: str, subfolder: str) -> dict:
         """Upload a planet continents aggregate file to R2."""
         hook = R2IndexHook(r2index_conn_id=R2INDEX_CONNECTION_ID)
@@ -266,6 +292,8 @@ with DAG(
         with TaskGroup(group_id=slug, group_display_name=f"Extract {continent['name']} Continent"):
             clip = Ogr2OgrOperator(
                 task_id="clip_coastline",
+                mem_limit=f"{OGR2OGR_MEM_GIB}g",
+                pool_slots=OGR2OGR_MEM_GIB,
                 task_display_name="Clip Coastline",
                 args=[
                     "-f", "GPKG", clipped_path,
@@ -280,6 +308,8 @@ with DAG(
 
             dissolve = Ogr2OgrOperator(
                 task_id="dissolve_polygons",
+                mem_limit=f"{DISSOLVE_MEM_GIB}g",
+                pool_slots=DISSOLVE_MEM_GIB,
                 task_display_name="Dissolve Polygons",
                 args=[
                     "-f", "GPKG", dissolved_path, clipped_path,
@@ -291,6 +321,8 @@ with DAG(
 
             export_gpkg = Ogr2OgrOperator(
                 task_id="export_gpkg",
+                mem_limit=f"{OGR2OGR_MEM_GIB}g",
+                pool_slots=OGR2OGR_MEM_GIB,
                 task_display_name="Export GeoPackage",
                 args=[
                     "-f", "GPKG", output_gpkg, dissolved_path,
@@ -302,6 +334,8 @@ with DAG(
 
             export_geojson_op = Ogr2OgrOperator(
                 task_id="export_geojson",
+                mem_limit=f"{OGR2OGR_MEM_GIB}g",
+                pool_slots=OGR2OGR_MEM_GIB,
                 task_display_name="Export GeoJSON",
                 environment={"OGR_GEOJSON_MAX_OBJ_SIZE": "0"},
                 args=[
@@ -317,6 +351,8 @@ with DAG(
 
             export_parquet_op = Ogr2OgrOperator(
                 task_id="export_parquet",
+                mem_limit=f"{OGR2OGR_MEM_GIB}g",
+                pool_slots=OGR2OGR_MEM_GIB,
                 task_display_name="Export GeoParquet",
                 args=[
                     "-f", "Parquet", output_parquet,
